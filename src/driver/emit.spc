@@ -915,7 +915,8 @@ fn tc_jobs(p: &loader::Package) sch::Jobs {
         eprint("item-stats typecheck serial order: {} module checkers open at once at the peak\n", peak);
     }
     let mut g = sch::Jobs::from_edges(nc + 1, &edges, order);
-    // The memory gate's estimate and the work's: the component's module-arena nodes.
+    // The memory gate's estimate and the work's: the component's module-arena nodes, its pinned bodies'
+    // past the declarations included.
     for c in 0..nc {
         let mut nodes: u64 = 0;
         for k in s.citem_off[c] as usize..s.citem_off[c + 1] as usize {
@@ -923,6 +924,7 @@ fn tc_jobs(p: &loader::Package) sch::Jobs {
             if p.idx().items.at(it).owner == loader::ITEM_NONE {
                 nodes += p.idx().items.at(it).node - s.top_lo[it];
             }
+            nodes += s.pin_n[it];
         }
         g.est.set(c, nodes * 96);
         g.cost.set(c, nodes);
@@ -1331,6 +1333,24 @@ pub(package) fn feature_errors(p: &loader::Package, i: usize, errs: &mut diag::E
 // `unsafe` (the program checks the features at run time); 2 it is an error even there: features are
 // per build on wasm32, and an extern binding or an `@always_inline` function inlines into its C
 // caller, which then lacks them.
+// Whether call `fc` of module `m` needs `unsafe` on another platform of the build's instruction set: it
+// needs a feature this platform's baseline gives and another's lacks, which neither the build's own
+// features nor its caller's add. A module that platform's builds share keeps the marker.
+fn needed_elsewhere(p: &loader::Package, m: usize, fc: &FeatureCall) bool {
+    let base = tgt::baseline(p.build_target, p.arch);
+    let mut own = p.features;
+    own.w[0] &= ~base.w[0];
+    own.w[1] &= ~base.w[1];
+    let have = cf::close(cf::join(own, p.fn_features(m as ModuleId, fc.caller)));
+    let need = p.fn_features(fc.callee.module, fc.callee.node);
+    for b in 0..cf::FEATURE_COUNT {
+        if cf::has(need, b) && !cf::has(have, b) && !tgt::baseline_everywhere(b, p.arch) {
+            return true;
+        }
+    }
+    return false;
+}
+
 fn feature_use(p: &loader::Package, m: usize, fc: &FeatureCall) u8 {
     // On wasm32 too a function's own features cover its calls: it is emitted only where the build
     // has them.
@@ -1357,7 +1377,8 @@ fn lint_feature_unsafe(p: &mut loader::Package, only_mod: i32, fixes: *mut Vecto
 
 /// The lints of module `m`'s uses of functions that need CPU features, into `errs`: a dispatch row
 /// whose feature does not imply its function's, and an `unsafe` marker whose only reason is such a call
-/// where no such call needs it (`feature_use`: "unnecessary 'unsafe'", with the prefix form's removal).
+/// where no such call needs it, on this platform or another of its instruction set (`feature_use`,
+/// `needed_elsewhere`: "unnecessary 'unsafe'", with the prefix form's removal).
 pub(package) fn feature_lints(p: &loader::Package, m: usize, errs: &mut diag::Errors) {
     let a = p.modules[m].ast.get_ref();
     // A dispatch row runs its function where the machine has the row's feature: that feature, with the
@@ -1390,7 +1411,7 @@ pub(package) fn feature_lints(p: &loader::Package, m: usize, errs: &mut diag::Er
     let mut need = Set::<u32>::new();
     for k in 0..a.feature_calls.len() {
         let fc = *a.feature_calls.at(k);
-        if fc.marker != 0 && feature_use(p, m, &fc) != 0 {
+        if fc.marker != 0 && (feature_use(p, m, &fc) != 0 || needed_elsewhere(p, m, &fc)) {
             need.insert(fc.marker - 1);
         }
     }
@@ -2734,16 +2755,12 @@ fn cemit_relower_census(
     }
 }
 
-// Take the graph's cached lowering of `(m, nid)` into `lw_out` (the graph lowered every body it
-// walked exactly once), lowering in place only when the cache has no live entry. A taken slot is
-// removed, so a second taker (a generic body the seed loop lowered and skipped) re-lowers.
-// `closure` selects a closure body (`nid` is the closure node) over a function body.
 // `__sc_simd_lvl()`, which the dispatch prologues read (`CEmit::dispatch_prologue`): the highest level
 // k (1-based) of `simd_levels` whose features the CPU detector reports (`sc_cpu_words`, which
-// `SC_CPU_OFF` masks), else 0, read once per TU. Only for a program with vector code: the loader
-// links the detector for it.
+// `SC_CPU_OFF` masks), else 0, read once per TU. Only for a program with vector code and a level that
+// plans it differently: the loader links the detector for it.
 fn simd_level_fn(p: &loader::Package, out: &mut String) {
-    if p.simd_levels.len() == 0 || !p.names_vectors() {
+    if p.simd_levels.len() == 0 || !p.names_vectors() || !p.levels_plan_vectors() {
         return;
     }
     out.push_str("void sc_cpu_words(uint64_t __out[2]);\n");
@@ -2781,6 +2798,10 @@ fn demand_set(p: &loader::Package, d: &cbe::Demand) cf::CpuFeatureSet {
     return p.fn_set(d.def.module, d.def.node);
 }
 
+// Take the graph's cached lowering of `(m, nid)` into `lw_out` (the graph lowered every body it
+// walked exactly once), lowering in place only when the cache has no live entry. A taken slot is
+// removed, so a second taker (a generic body the seed loop lowered and skipped) re-lowers.
+// `closure` selects a closure body (`nid` is the closure node) over a function body.
 fn cemit_take_body(
     g: &mut ig::InstGraph,
     p: *const loader::Package,
@@ -3351,6 +3372,7 @@ struct SeedShard {
     pub(package) dvars: Vector<irl::Lowerer>,
     pub(package) dclo_keys: Vector<u64>, // closure lowerings this slice produced on a shared-cache miss
     pub(package) dclo: Vector<irl::Lowerer>,
+    pub(package) deps: Vector<u64>, // seed shards: the functions its bodies call (`DropCtx.deps`)
 }
 
 // Counts of a drain shard's capture rows and sink sizes at one demand boundary; every row carries
@@ -3431,6 +3453,7 @@ extend SeedShard {
             dvars: Vector::<irl::Lowerer>::new(),
             dclo_keys: Vector::<u64>::new(),
             dclo: Vector::<irl::Lowerer>::new(),
+            deps: Vector::<u64>::new(),
         };
         sh.cem.mg.fn_pred = pred;
         if used {
@@ -3508,6 +3531,7 @@ fn cemit_seed_task(t: SeedTask) {
     let mut clws = Vector::<irl::Lowerer>::new();
     o.cem.swap_caches(&mut dow.lc);
     o.cem.mg.swap_escapes(&mut dow.esc);
+    dow.deps_on(o.cem.mg.rec_on);
     cemit_seed_module(
         p,
         &mut o.cem,
@@ -3521,6 +3545,7 @@ fn cemit_seed_task(t: SeedTask) {
         t.kl,
         &mut o.acc,
     );
+    o.deps = dow.deps_off();
     if t.ctl != null {
         (unsafe &*t.ctl).release(t.est);
     }
@@ -4430,13 +4455,15 @@ fn cemit_seed_master(
     } else {
         0u64
     };
+    dow.deps_on(rec);
     cemit_seed_module(p, cem, g, dow, cl_cache, clws, m, testing, verbose, null, acc);
+    let mut deps = dow.deps_off();
     if p.icost_on {
         gitems::mod_cost(p, m, 0, std::parallel::platform::now_ns() - ts0);
     }
     if rec {
         cem.mg.rec_on = false;
-        rec_close(p, cem, &mk, m, acc.ch.bufs.at(m).as_str(), tuc);
+        rec_close(p, cem, &mk, m, acc.ch.bufs.at(m).as_str(), &mut deps, tuc);
         cem.mg.rec.truncate(mk.seg);
     }
 }
@@ -4454,7 +4481,15 @@ struct RecMark {
 // Close module `m`'s section: journal the trailing deltas past `mk` (their accumulators are consumed
 // whole at assembly, so only their internal order matters), then serialize the events from
 // `mk.seg` on, with chunk texts from `text`, as the module's section.
-fn rec_close(p: &loader::Package, cem: &mut cbe::CEmit, mk: &RecMark, m: usize, text: str, tuc: &mut tuc::Tuc) {
+fn rec_close(
+    p: &loader::Package,
+    cem: &mut cbe::CEmit,
+    mk: &RecMark,
+    m: usize,
+    text: str,
+    deps: &mut Vector<u64>,
+    tuc: &mut tuc::Tuc,
+) {
     rec_aux(cem, mk.aux, mk.hedge);
     if cem.env_fwd.len() > mk.efwd {
         let mut ev9 = mbe::RecEv::blank(mbe::RK_EFWD);
@@ -4467,7 +4502,9 @@ fn rec_close(p: &loader::Package, cem: &mut cbe::CEmit, mk: &RecMark, m: usize, 
         cem.mg.rec.push(ev9);
     }
     rec_edges(cem, m, p.modules.len(), mk.tn);
-    tuc.sec_rec(p, m, &cem.mg.rec, mk.seg, text);
+    deps.sort();
+    deps.dedup();
+    tuc.sec_rec(p, m, &cem.mg.rec, mk.seg, text, deps);
 }
 
 // Journal the `aux` entries from row `a0` on (one event each: owner, key, text) and the header
@@ -4896,8 +4933,8 @@ pub(package) fn cemit_package(
     // The concrete functions the seed pass emits: what the walks reach from the roots. A function only
     // the emitted text names is emitted late, so the set predicts the seeds and never decides output.
     let mut pred = Set::<u64>::new();
+    let mut rf = Vector::<DefId>::new();
     {
-        let mut rf = Vector::<DefId>::new();
         reach_roots(p, &g, live, testing, &mut rf);
         // A call of an inline candidate splices its body: with the inliner on, the call alone does
         // not make the callee emitted (`InstGraph::reach`).
@@ -4910,6 +4947,13 @@ pub(package) fn cemit_package(
         pred = replace(&mut g.reached, Set::<u64>::new());
     }
     let predp = (&pred) as *const Set<u64>;
+    // The per-TU cache reads the bodies' blocks (`tuc::Shapes`); a test build keeps no cache.
+    let tuc_root = if testing {
+        String::new()
+    } else {
+        p.gen_root.clone()
+    };
+    let shp = tuc::shapes(p, &tuc_root);
     // Every body is lowered and kept, every constant and static_assert is evaluated, and the live
     // set and the emit order have read their last reference: the body syntax has no reader left.
     p.release_bodies();
@@ -5024,15 +5068,12 @@ pub(package) fn cemit_package(
     }
     let mut tuc = tuc::tuc_setup(
         p,
+        shp,
         live,
         &salt,
         target,
-        if testing {
-            // The wrapper set would join the fingerprint for little gain.
-            ""
-        } else {
-            p.gen_root.as_str()
-        },
+        // The wrapper set would join the fingerprint for little gain.
+        &tuc_root,
         // A C section carries its module's C text, as large as the module's TU buffer; a native one carries
         // the module's replay events alone, under a quarter of its source.
         if p.native {
@@ -5040,6 +5081,8 @@ pub(package) fn cemit_package(
         } else {
             2 * src_total
         },
+        &g,
+        &rf,
     );
     let mut held = Vector::<Option<lhold::Rec>>::new();
     nat_trust(p, &mut tuc, &mut held, &mut o.nat_rec);
@@ -5154,7 +5197,7 @@ pub(package) fn cemit_package(
                 // The shard's journal becomes the module's section: trailing deltas are the whole
                 // shard-local accumulators, chunk texts materialize from the shard's bodies buffer.
                 let zero = RecMark { seg: 0, aux: 0, efwd: 0, eh: 0, hedge: 0, tn: 0 };
-                rec_close(p, &mut o.cem, &zero, m, o.acc.ch.bufs.at(0).as_str(), &mut tuc);
+                rec_close(p, &mut o.cem, &zero, m, o.acc.ch.bufs.at(0).as_str(), &mut o.deps, &mut tuc);
             }
             acc.absorb_seed(&mut o.acc, m);
             cem.pr.merge(&o.cem.pr);
@@ -5827,6 +5870,7 @@ pub(package) fn cemit_package(
     // static groups persist), and the descriptor sections below render from the same store.
     let mut cdit = iri::interp_new(p);
     cdit.parent = p.cir as *const iri::Interp;
+    cdit.reads = p.ce_reads.get();
     if cdit.parent != null {
         // the type check's budgets: a constant it accepted must evaluate here too
         cdit.build_steps = unsafe (*cdit.parent).build_steps;
@@ -8633,6 +8677,9 @@ struct DropCtx {
     pub(package) lc: lw::LCaches,
     /// The same for the shard's identifier escape cache (`mbe::Mangler::swap_escapes`).
     pub(package) esc: Vector<u64>,
+    /// While a module's section records (`deps_on`): the functions its bodies call, before and after the
+    /// inliner, as `module << 32 | node` (`tuc::dep_hash`).
+    pub(package) deps: Vector<u64>,
 }
 
 extend DropCtx {
@@ -8654,7 +8701,24 @@ extend DropCtx {
             pr: prb::Probe::new(stdlib::getenv("SC_CEMIT_STATS") != null, stdlib::getenv("SC_BUILD_MEM") != null),
             lc: lw::LCaches::new(),
             esc: Vector::<u64>::new(),
+            deps: Vector::<u64>::new(),
         };
+    }
+
+    // Collect the calls of the bodies this context prepares from now on when `on` (`deps`).
+    fn deps_on(self: &mut Self, on: bool) {
+        self.deps.truncate(0);
+        self.inl.deps.truncate(0);
+        self.inl.deps_on = on;
+    }
+
+    // The calls collected since `deps_on`, the inliner's runs outside `apply_drops_i` included, which ends
+    // the collection.
+    fn deps_off(self: &mut Self) Vector<u64> {
+        self.inl.deps_on = false;
+        self.deps.extend_copy(&self.inl.deps);
+        self.inl.deps.truncate(0);
+        return replace(&mut self.deps, Vector::<u64>::new());
     }
 
     // The calls inlined.
@@ -8762,6 +8826,17 @@ extend DropCtx {
             bce::stats_line(&bst, &mut line);
             eprint("{} owner {}:{}\n", line.as_str(), lw.body.module, lw.body.owner.node);
             line.free();
+        }
+        if self.inl.deps_on {
+            // The callees the inliner looked at (spliced or not), then the calls the body keeps.
+            self.deps.extend_copy(&self.inl.deps);
+            self.inl.deps.truncate(0);
+            for i in 0..lw.body.blocks.len() {
+                let t = &lw.body.blocks.at(i).term;
+                if t.kind == irc::TM_CALL && t.callee.node != NODE_NONE {
+                    self.deps.push(t.callee.module as u64 << 32 | t.callee.node as u64);
+                }
+            }
         }
         return ist.inlined;
     }
@@ -9714,6 +9789,18 @@ fn cemit_assemble(
             rg.push_str(
                 " };\n__attribute__((constructor)) static void __sc_reflect_init(void) { __sc_reflect_register(__sc_reflect_roots, sizeof(__sc_reflect_roots) / sizeof(__sc_reflect_roots[0])); }\n",
             );
+        }
+        if dit_byte(p) {
+            rg.push_str(
+                "unsigned long getauxval(unsigned long);\nunsigned char __sc_dit;\n__attribute__((constructor)) static void __sc_dit_init(void) { __sc_dit = (getauxval(16) & ",
+            );
+            rg.format_into("{}UL) != 0; }}\n", tgt::DIT_HWCAP_BIT);
+        }
+        if cbe::sve_byte(p) {
+            rg.push_str(
+                "unsigned long getauxval(unsigned long);\nunsigned char __sc_sve;\n__attribute__((constructor)) static void __sc_sve_init(void) { __sc_sve = (getauxval(16) & ",
+            );
+            rg.format_into("{}UL) != 0; }}\n", tgt::SVE_HWCAP_BIT);
         }
         let mut rc = String::from_str("#include \"__sc_fwd.h\"\n");
         rc.push_string(&xall);
@@ -12986,6 +13073,8 @@ struct NatObj {
     pub(package) piece: u32,
     pub(package) bytes: Vector<u8>,
     pub(package) old: bool,
+    pub(package) key: u128, // its content key (`nat_piece_key`), 0 for none
+    pub(package) chash: u64, // the hash of its bytes (`nat_bytes_hash`) with a key
 }
 
 // The instructions of one object of a part, about (`nat_pieces`): a larger part compiles as several
@@ -13014,6 +13103,282 @@ fn nat_obj_path(root: str, mp: str, own: bool, k: u32) String {
         format("__inst.{}.o", k)
     };
     return build_out_path(root, mp, &ext);
+}
+
+// A 128-bit content hash in two independent lanes (`nat_piece_key`): a collision would link stale code.
+struct NatHash {
+    a: u64,
+    b: u64,
+}
+
+extend NatHash {
+    const fn w(self: &mut Self, v: u64) {
+        let x = (self.a ^ v).wrapping_mul(0x9E3779B97F4A7C15u64);
+        self.a = x ^ x >> 29;
+        self.b = (self.b.rotate_left(23) ^ v).wrapping_mul(0xFF51AFD7ED558CCDu64).wrapping_add(v);
+    }
+
+    // `n` bytes at `p`, after their count.
+    const fn bytes(self: &mut Self, p: *const u8, n: usize) {
+        self.w(n as u64);
+        let mut i: usize = 0;
+        while i + 8 <= n {
+            let mut v: u64 = 0;
+            for k in 0..8usize {
+                v = v | (unsafe p[i + k]) as u64 << (8 * k) as u64;
+            }
+            self.w(v);
+            i += 8;
+        }
+        let mut v: u64 = 0;
+        for k in i..n {
+            v = v | (unsafe p[k]) as u64 << (8 * (k - i)) as u64;
+        }
+        self.w(v);
+    }
+
+    const fn s(self: &mut Self, t: str) {
+        self.bytes(t.ptr(), t.len());
+    }
+
+    // `n` 32-bit words at `p`, after their count.
+    const fn u32s(self: &mut Self, p: *const u32, n: usize) {
+        self.w(n as u64);
+        let mut i: usize = 0;
+        while i + 1 < n {
+            self.w((unsafe p[i]) as u64 | (unsafe p[i + 1]) as u64 << 32);
+            i += 2;
+        }
+        if i < n {
+            self.w(unsafe p[i]);
+        }
+    }
+
+    const fn u64s(self: &mut Self, v: &Vector<u64>) {
+        self.w(v.len() as u64);
+        for k in 0..v.len() {
+            self.w(v[k]);
+        }
+    }
+
+    const fn key(self: &Self) u128 {
+        return splitmix(self.a) as u128 << 64 | splitmix(self.b ^ self.a.rotate_left(32));
+    }
+}
+
+// The derived hashes of the records `nat_piece_key` hashes whole (`lir_ir::Cpu`).
+extend NatHash as Hasher {
+    fn write(self: &mut Self, bytes: []u8) {
+        self.bytes(bytes.ptr, bytes.len);
+    }
+
+    fn finish(self: &Self) u64 {
+        return (self.key() >> 64) as u64;
+    }
+}
+
+// `nat_piece_key` hashes every field of these records: a field added to one is added there. A body's size
+// is a 64-bit host's (its tables hold pointers).
+static_assert(sizeof(lir_ir::Sym) == 56, "nat_sym_hash hashes every field of a symbol");
+static_assert(sizeof(usize) != 8 || sizeof(lir_ir::Body) == 416, "nat_body_hash hashes every field of a body");
+static_assert(sizeof(lir_ir::DataDef) == 24, "nat_data_hash hashes every field of a data definition");
+static_assert(sizeof(lir_ir::Reloc) == 16, "nat_data_hash hashes every field of a relocation");
+static_assert(sizeof(lir_ir::Slot) == 8, "nat_body_hash hashes every field of a slot");
+static_assert(sizeof(lir_ir::Loc) == 12, "nat_body_hash hashes every field of a location");
+static_assert(sizeof(lir_ir::Scope) == 12, "nat_body_hash hashes every field of a scope");
+static_assert(sizeof(lir_ir::Inst) == 16, "nat_body_hash hashes an instruction as four words");
+static_assert(sizeof(lir_ir::Block) == 16, "nat_body_hash hashes a block as four words");
+
+// Symbol `s` of `pk` as a reference shows it to the code generators: its spelling, kind, linkage, C-library
+// mark, a function's kept mark where it decides the call's convention (not an extern binding's: `win64`) and
+// section; whether the program defines it (`Package::defines`, the same in a build that replays its unit):
+// for a function only where its spelling may name a C function (`intrin`, an `__sc_x_` alias: a C-library
+// or kept one), for data always.
+const fn nat_sym_ref(h: &mut NatHash, pk: &lir_ir::Package, s: u32) {
+    let y = pk.syms[s as usize];
+    let nm = pk.spell(y.name);
+    h.s(nm);
+    let undef = !pk.defines(s);
+    let named = y.kind != lir_ir::SK_FUNC || y.ext || y.used || nm.starts_with("__sc_x_");
+    let kept = y.used && !y.ext && y.kind == lir_ir::SK_FUNC;
+    h.w(y.kind as u64 | y.linkage as u64 << 8 | y.ext as u64 << 16 | kept as u64 << 17 | (named && undef) as u64 << 18);
+    if y.sect == lir_ir::NONE {
+        h.w(0xFFFFFFFFFFFFFFFFu64);
+    } else {
+        h.s(pk.spell(y.sect));
+    }
+}
+
+// Symbol `s` of `pk` whole, as the object that defines it or copies it reads it: its spelling and every
+// fact, its section by spelling and its parameters' byte ranges (`Sym.span`); its definition and
+// signature only as present or not.
+const fn nat_sym_hash(h: &mut NatHash, pk: &lir_ir::Package, s: u32) {
+    let y = pk.syms[s as usize];
+    h.s(pk.spell(y.name));
+    h.w(
+        y.kind as u64 | y.linkage as u64 << 8 | y.fx as u64 << 16 | y.alloc as u64 << 24 | y.used as u64 << 32 | y.noinline as u64 << 33 | y.always as u64 << 34 | y.cold as u64 << 35 | y.sec as u64 << 36 | y.own as u64 << 37 | y.internal as u64 << 38 | y.ext as u64 << 39 | (y.unit != lir_ir::NONE) as u64 << 40 | (y.def != lir_ir::NONE) as u64 << 41 | (y.sig != lir_ir::NONE) as u64 << 42,
+    );
+    h.w(y.esc);
+    h.w(y.wargs);
+    if y.sect == lir_ir::NONE {
+        h.w(0xFFFFFFFFFFFFFFFFu64);
+    } else {
+        h.s(pk.spell(y.sect));
+    }
+    if y.span == lir_ir::NONE {
+        h.w(0xFFFFFFFFFFFFFFFFu64);
+    } else {
+        let n = pk.spans[y.span as usize] as usize;
+        for k in 0..n + 1 {
+            h.w(pk.spans[y.span as usize + k]);
+        }
+    }
+}
+
+// Body `b` of `pk`, every table, with the symbols it names (into `refs` too), its messages and its lines'
+// files by spelling.
+fn nat_body_hash(h: &mut NatHash, pk: &lir_ir::Package, b: &lir_ir::Body, refs: &mut Vector<u32>) {
+    h.u32s(b.insts.as_ptr() as *const u32, 4 * b.insts.len());
+    h.u32s(b.locs.as_ptr(), b.locs.len());
+    h.u32s(b.blocks.as_ptr() as *const u32, 4 * b.blocks.len());
+    h.bytes(b.params.as_ptr(), b.params.len());
+    h.u32s(b.pool.as_ptr(), b.pool.len());
+    h.u64s(&b.words);
+    h.w(b.slots.len() as u64);
+    for k in 0..b.slots.len() {
+        h.w(b.slots[k].size as u64 | b.slots[k].align_log2 as u64 << 32);
+    }
+    h.w(b.syms.len() as u64);
+    for k in 0..b.syms.len() {
+        nat_sym_ref(h, pk, b.syms[k]);
+        refs.push(b.syms[k]);
+    }
+    h.w(b.msgs.len() as u64);
+    for k in 0..b.msgs.len() {
+        h.s(pk.spell(pk.msgs[b.msgs[k] as usize]));
+    }
+    // Entry 0 is "no location": no line row names it (`place::row`), and its file is any.
+    h.w(b.lines.len() as u64);
+    for k in 1..b.lines.len() {
+        let l = b.lines[k];
+        if l.file as usize < pk.files.len() {
+            h.s(pk.spell(pk.files[l.file as usize]));
+        } else {
+            h.w(l.file);
+        }
+        h.w(l.line as u64 | l.col as u64 << 32);
+    }
+    h.u32s(b.inl.as_ptr(), b.inl.len());
+    h.w(b.sig);
+    h.u32s(b.refs.as_ptr(), b.refs.len());
+    h.u64s(&b.owned);
+    h.w(b.bools);
+    h.u64s(&b.ranges);
+    h.w(b.fmath as u64 | b.ct as u64 << 8 | b.naked as u64 << 9);
+    h.w(b.scopes.len() as u64);
+    for k in 0..b.scopes.len() {
+        let c = b.scopes[k];
+        h.w(c.site as u64 | c.group as u64 << 32);
+        h.w(c.root);
+    }
+    b.cpu.hash_into(h);
+}
+
+// Data definition `d` of `pk`: its facts, bytes and relocations (their targets into `refs` too).
+fn nat_data_hash(h: &mut NatHash, pk: &lir_ir::Package, d: u32, refs: &mut Vector<u32>) {
+    let dd = pk.data[d as usize];
+    h.w(dd.size as u64 | dd.align_log2 as u64 << 32 | dd.readonly as u64 << 40);
+    h.bytes(unsafe (pk.bytes.as_ptr() + dd.bytes as usize), dd.nbytes as usize);
+    h.w(dd.nrelocs);
+    for r in dd.relocs..dd.relocs + dd.nrelocs {
+        let x = pk.relocs[r as usize];
+        h.w(x.offset);
+        h.w(x.addend as u64);
+        nat_sym_ref(h, pk, x.sym);
+        refs.push(x.sym);
+    }
+}
+
+// The content key of a native object (`nat::object_with` on `os`, `isa`): the build's settings (`base`)
+// and the compiler, the module-level assembly `text`, functions `fs` and data `ds` of `pk` with their
+// definitions, the definitions the object copies (a symbol no unit claims) and what those name in turn,
+// each symbol any of them names (`nat_sym_hash`) and a named data symbol's alignment, which the code
+// generators read. On wasm also the package's files (the debug information lists them all) and each
+// named function's signature (`nat_sig_hash`); 0 (no key) when a named function has none there (the code
+// generator then reads any call of it). Nothing of a symbol another unit defines depends on whether the
+// build lowers or replays that unit.
+fn nat_piece_key(pk: &lir_ir::Package, os: i32, isa: i32, fs: &Vector<u32>, ds: &Vector<u32>, text: str, base: u64) u128 {
+    let wasm = nat::wasm32(os, isa);
+    let mut h = NatHash { a: base ^ 0x2545F4914F6CDD1Du64, b: compiler_id() };
+    h.w(os as u64 << 32 | isa as u64);
+    h.s(text);
+    h.s(&pk.comp_dir);
+    if wasm && pk.debug {
+        h.w(pk.files.len() as u64);
+        for k in 0..pk.files.len() {
+            h.s(pk.spell(pk.files[k]));
+        }
+    }
+    h.w(fs.len() as u64);
+    h.w(ds.len() as u64);
+    let mut full = Vector::<u32>::with_capacity(fs.len() + ds.len());
+    let mut seen = Set::<u32>::new();
+    for k in 0..fs.len() + ds.len() {
+        let s = if k < fs.len() {
+            fs[k]
+        } else {
+            ds[k - fs.len()]
+        };
+        full.push(s);
+        seen.insert(s);
+    }
+    let mut refs = Vector::<u32>::new();
+    // Each symbol once.
+    let mut k: usize = 0;
+    for _ in 0..pk.syms.len() + 1 {
+        if k >= full.len() {
+            break;
+        }
+        let s = full[k];
+        k += 1;
+        nat_sym_hash(&mut h, pk, s);
+        let y = pk.syms[s as usize];
+        refs.truncate(0);
+        if y.def != lir_ir::NONE {
+            if y.kind == lir_ir::SK_FUNC {
+                nat_body_hash(&mut h, pk, &pk.bodies[y.def as usize], &mut refs);
+            } else {
+                nat_data_hash(&mut h, pk, y.def, &mut refs);
+            }
+        }
+        for j in 0..refs.len() {
+            let r = refs[j];
+            let ry = pk.syms[r as usize];
+            if seen.contains(&r) {
+                continue;
+            }
+            seen.insert(r);
+            // What the generators read of a symbol another unit defines, the same whether the build lowers
+            // or replays that unit: a data symbol's alignment (`Package::data_align`), a function's
+            // signature on wasm (`wasmabi::classify`).
+            if ry.def != lir_ir::NONE && ry.unit == lir_ir::NONE {
+                full.push(r);
+            } else if ry.kind != lir_ir::SK_FUNC {
+                h.w(pk.data_align(r));
+            } else if wasm {
+                if ry.def != lir_ir::NONE {
+                    let cb = &pk.bodies[ry.def as usize];
+                    nat_sig_hash(&mut h, cb, cb.sig);
+                } else if ry.sig != lir_ir::NONE {
+                    let d = &pk.decls[ry.sig as usize];
+                    nat_sig_hash(&mut h, d, d.sig);
+                } else {
+                    return 0;
+                }
+            }
+        }
+    }
+    return h.key();
 }
 
 // Into `pf` and `pd`, the pieces of a part with functions `fs` and data `ds` of package `pk`, each list in
@@ -13143,6 +13508,17 @@ struct NatTask {
     pub(package) why: *mut String,
     pub(package) ok: *mut bool,
     pub(package) syms: *const NatSyms,
+    // The object's content key (`nat_piece_key`) and the key and content hash of the object an earlier
+    // build left at its path `path` (`want` 0: none): the same key, with that object's bytes still of that
+    // hash, reuses the object (`reuse`, its bytes into `bytes`) instead of compiling. `chash` takes the
+    // hash of the bytes either way.
+    pub(package) base: u64,
+    pub(package) key: *mut u128,
+    pub(package) want: u128,
+    pub(package) want_h: u64,
+    pub(package) path: *const String,
+    pub(package) chash: *mut u64,
+    pub(package) reuse: *mut bool,
 }
 
 // Tasks read the finished LIR and their part's symbol lists, and write their own slots.
@@ -13160,6 +13536,19 @@ fn nat_task(t: NatTask) {
     let fs = unsafe &*t.fs;
     let ds = unsafe &*t.ds;
     let ns = unsafe &*t.syms;
+    let key = nat_piece_key(unsafe &*t.pk, t.os, t.isa, fs, ds, unsafe (*t.text).as_str(), t.base);
+    unsafe *t.key = key;
+    if key != 0 && key == t.want {
+        if let Some(b) = lku::read(unsafe (*t.path).as_str()) {
+            if nat_bytes_hash(&b) == t.want_h {
+                unsafe *t.bytes = b;
+                unsafe *t.chash = t.want_h;
+                unsafe *t.reuse = true;
+                unsafe *t.ok = true;
+                return;
+            }
+        }
+    }
     // A task preempted while it holds a table would make its worker's next task take another.
     prt::preempt_mask_enter();
     unsafe sc_runtime::sc_rt_spin_lock(ns.lock.get());
@@ -13179,7 +13568,16 @@ fn nat_task(t: NatTask) {
     unsafe sc_runtime::sc_rt_spin_lock(ns.lock.get());
     unsafe (*ns.free.get()).push(tab);
     unsafe sc_runtime::sc_rt_spin_unlock(ns.lock.get());
+    unsafe *t.chash = nat_bytes_hash(unsafe &*t.bytes);
     prt::preempt_mask_exit();
+}
+
+// The content hash of object bytes `b` (`NAT_KEYS`).
+const fn nat_bytes_hash(b: &Vector<u8>) u64 {
+    let mut h = NatHash { a: 0x2545F4914F6CDD1Du64, b: b.len() as u64 };
+    h.bytes(b.as_ptr(), b.len());
+    let k = h.key();
+    return (k >> 64) as u64 ^ k as u64;
 }
 
 // The native objects' record (`__sc_native` in the tree): per module, the key its own part was compiled
@@ -13187,6 +13585,111 @@ fn nat_task(t: NatTask) {
 // that part has objects and the next 7 their count less one (`nat_pieces`) (`<key> <path>` lines). A cached
 // emission of a module counts only under its record's key.
 const NAT_RECORD: str = "__sc_native";
+
+// The content keys of the tree's native objects (`nat_piece_key`): `<key> <hash> <object path>` lines, the
+// key as 32 hex digits, the hash of the object's bytes as 16 (`nat_bytes_hash`), the path below the tree
+// root. A build removes it before it writes objects and writes it after; an object another writer (another
+// compiler) replaced since has other bytes.
+const NAT_KEYS: str = "__sc_native_keys";
+
+// Signature `sig` of body `b` as `wasmabi::classify` reads it: its counts and each parameter's and the
+// result's type, an aggregate's by its layout record (size, alignment and leaves).
+const fn nat_sig_hash(h: &mut NatHash, b: &lir_ir::Body, sig: u32) {
+    let np = b.pool[sig as usize];
+    h.w(np as u64 | b.pool[sig as usize + 1] as u64 << 32);
+    for k in 0..np + 1 {
+        let pt = if k == np {
+            b.pool[sig as usize + 2]
+        } else {
+            b.pool[(sig + 3 + k) as usize]
+        };
+        if (pt & lir_ir::AGG) == 0 {
+            h.w(pt);
+            continue;
+        }
+        let l = (pt & ~lir_ir::AGG) as usize;
+        let nleaf = b.pool[l + 2];
+        h.w(0xFFFFFFFF00000000u64 | nleaf as u64);
+        h.w(b.pool[l] as u64 | b.pool[l + 1] as u64 << 32);
+        for j in 0..2 * nleaf as usize {
+            h.w(b.pool[l + 3 + j]);
+        }
+    }
+}
+
+// The line of `NAT_KEYS` of the object at `rel` below the tree root, of content key `key` and bytes hash `h`.
+fn nat_key_line(key: u128, h: u64, rel: str) String {
+    return format("{:016x}{:016x} {:016x} {}\n", (key >> 64) as u64, key as u64, h, rel);
+}
+
+// Write record `NAT_KEYS` at `path` of the tree at `root`: this build's `lines` (by object path), and the
+// entries of the earlier record `prev` whose objects the tree still holds (a unit the build engine did not
+// run again keeps them), in the byte order of their paths below the root. The record describes the tree,
+// whatever the builds before compiled and however many workers compiled it.
+fn write_nat_keys(path: str, root: str, prev: &Map<String, NatKey>, lines: &mut Map<String, String>) {
+    let mut pk = prev.keys();
+    loop {
+        switch pk.next() {
+            Some(op) => {
+                if !lines.contains_key(op) && fs::stat(op.as_str()).is_ok() {
+                    let e = prev.get(op).unwrap();
+                    lines.insert(op.clone(), nat_key_line(e.key, e.hash, op.as_str().slice(root.len() + 1, op.len())));
+                }
+            },
+            None => {
+                break;
+            },
+        }
+    }
+    // Every path starts with `root`: their byte order is the order of the paths below it.
+    let mut paths = Vector::<String>::with_capacity(lines.len());
+    let mut lk = lines.keys();
+    loop {
+        switch lk.next() {
+            Some(op) => {
+                paths.push(op.clone());
+            },
+            None => {
+                break;
+            },
+        }
+    }
+    paths.sort();
+    let mut text = String::new();
+    for k in 0..paths.len() {
+        text.push_string(lines.get(&paths[k]).unwrap());
+    }
+    if text.len() != 0 {
+        let _ = write_file_atomic(path, &text);
+    }
+}
+
+// An object's entry in `NAT_KEYS`: its content key and the hash of its bytes.
+struct NatKey {
+    pub(package) key: u128,
+    pub(package) hash: u64,
+}
+
+// The entries of record `NAT_KEYS` at `path` of the tree at `root`, by object path.
+fn nat_keys(path: str, root: str) Map<String, NatKey> {
+    let mut keys = Map::<String, NatKey>::new();
+    let rt = loader::read_file(path).unwrap_or(String::new());
+    for line in rt.as_str().split("\n") {
+        if line.len() < 51 || line.byte_at(32) != b' ' || line.byte_at(49) != b' ' {
+            continue;
+        }
+        switch (parse_hex64(line.slice(0, 16)), parse_hex64(line.slice(16, 32)), parse_hex64(line.slice(33, 49))) {
+            (Some(a), Some(b), Some(f)) => {
+                keys.insert(
+                    format("{}/{}", root, line.slice(50, line.len())),
+                    NatKey { key: a as u128 << 64 | b, hash: f },
+                );
+            },
+            _ => {},
+        }
+    }
+    return keys;
+}
 const NAT_OBJ: u64 = 1;
 const NAT_FLAGS: u64 = 0xFF;
 
@@ -13328,11 +13831,17 @@ const fn loop_budgets(p: &loader::Package, opt: i32, cg: u64) lu::Budgets {
 
 // The package part of a module's native key, which is its emission cache key (which covers the bodies
 // the LIR inliner can copy: its imports') xor this: what the native code reads beyond the C text: the
-// build configuration, the CPU features, the LIR optimizer's switches, the C headers' constants, the
-// functions only C defines, and with debug information the directory its file names are relative to.
+// build configuration, the CPU features and run-time copy levels, the LIR optimizer's switches, the C
+// headers' constants, the functions only C defines, and with debug information the directory its file
+// names are relative to.
 fn nat_base(p: &loader::Package) u64 {
     let mut h = p.build_cfg as u64 << 40 ^ p.features.w[0].wrapping_mul(0x9E3779B97F4A7C15) ^ p.features.w[1];
     h = h ^ p.build_target as u64 << 8 ^ p.arch as u64 ^ p.pic as u64 << 7;
+    // The run-time copy levels: the copies of a body the code generator adds (`lir::ir::Package.copy_flags`).
+    for k in 0..p.simd_levels.len() {
+        let l = p.simd_levels[k];
+        h = h ^ (l.w[0] ^ l.w[1].rotate_left(29) ^ k as u64 + 1).wrapping_mul(0xD1B54A32D192ED03);
+    }
     if p.debug_info {
         h = h ^ (fnv(process::current_dir().unwrap_or(String::new()).as_str()) | 1).wrapping_mul(0xC4CEB9FE1A85EC53);
     }
@@ -13414,6 +13923,7 @@ fn native_plan(
     root: str,
     hit: &Vector<bool>,
     rec: &Map<String, u64>,
+    keys: &Map<String, NatKey>,
     asm_text: &mut Vector<String>,
     isnat: &mut Vector<bool>,
     objs: &mut Vector<NatObj>,
@@ -13548,6 +14058,32 @@ fn native_plan(
     pwhys.resize_default(np);
     let mut oks = Vector::<bool>::new();
     oks.resize_default(np);
+    let mut pkeys = Vector::<u128>::new();
+    pkeys.resize_default(np);
+    let mut reuse = Vector::<bool>::new();
+    reuse.resize_default(np);
+    // Per piece, its path and the entry of the object there (`NAT_KEYS`).
+    let mut want = Vector::<u128>::with_capacity(np);
+    let mut want_h = Vector::<u64>::with_capacity(np);
+    let mut paths = Vector::<String>::with_capacity(np);
+    let mut chash = Vector::<u64>::new();
+    chash.resize_default(np);
+    for q in 0..np {
+        let part = ppart[q] as usize;
+        let op = nat_obj_path(root, &p.modules[part / 2].path, part % 2 == 0, pnum[q]);
+        switch keys.get(&op) {
+            Some(e) => {
+                want.push(e.key);
+                want_h.push(e.hash);
+            },
+            None => {
+                want.push(0);
+                want_h.push(0);
+            },
+        }
+        paths.push(op);
+    }
+    let base = nat_base(p);
     let none = String::new();
     // Largest first, for the balance of the pool.
     let mut todo = Vector::<u64>::with_capacity(np);
@@ -13580,6 +14116,13 @@ fn native_plan(
             why: pwhys.index_mut(q),
             ok: oks.index_mut(q),
             syms: &syms,
+            base: base,
+            key: pkeys.index_mut(q),
+            want: want[q],
+            want_h: want_h[q],
+            path: paths.at(q),
+            chash: chash.index_mut(q),
+            reuse: reuse.index_mut(q),
         };
         if p.jobs == 1 || todo.len() == 1 {
             nat_task(t);
@@ -13610,6 +14153,7 @@ fn native_plan(
     }
     let mut nc: u64 = 0;
     let mut nn: u64 = 0;
+    let mut nr: u64 = 0;
     let mut ok = true;
     for m in 0..n {
         if !*unit.at(m) {
@@ -13624,8 +14168,25 @@ fn native_plan(
         if good {
             isnat.set(m, true);
             nn += 1;
+            // A recorded object keeps its entry (`NAT_KEYS`): the record describes the whole tree, whatever
+            // the build before compiled.
             for k in 0..olds[m] {
-                objs.push(NatObj { m: m as ModuleId, own: true, piece: k, bytes: Vector::<u8>::new(), old: true });
+                let op = nat_obj_path(root, &p.modules[m].path, true, k);
+                let (key, ch) = switch keys.get(&op) {
+                    Some(e) => (e.key, e.hash),
+                    None => (0u128, 0u64),
+                };
+                objs.push(
+                    NatObj {
+                        m: m as ModuleId,
+                        own: true,
+                        piece: k,
+                        bytes: Vector::<u8>::new(),
+                        old: true,
+                        key: key,
+                        chash: ch,
+                    },
+                );
             }
             for part in 2 * m..2 * m + 2 {
                 if first[part] == lir_ir::NONE {
@@ -13633,15 +14194,47 @@ fn native_plan(
                 }
                 let mut q = first[part] as usize;
                 while q < np && ppart[q] as usize == part {
-                    if bytes.at(q).len() != 0 {
+                    if reuse[q] {
+                        nr += 1;
                         let b = replace(bytes.index_mut(q), Vector::<u8>::new());
-                        objs.push(NatObj { m: m as ModuleId, own: part == 2 * m, piece: pnum[q], bytes: b, old: false });
+                        objs.push(
+                            NatObj {
+                                m: m as ModuleId,
+                                own: part == 2 * m,
+                                piece: pnum[q],
+                                bytes: b,
+                                old: true,
+                                key: pkeys[q],
+                                chash: chash[q],
+                            },
+                        );
+                    } else if bytes.at(q).len() != 0 {
+                        let b = replace(bytes.index_mut(q), Vector::<u8>::new());
+                        objs.push(
+                            NatObj {
+                                m: m as ModuleId,
+                                own: part == 2 * m,
+                                piece: pnum[q],
+                                bytes: b,
+                                old: false,
+                                key: pkeys[q],
+                                chash: chash[q],
+                            },
+                        );
                     }
                     q += 1;
                 }
             }
             if stats {
-                eprint("native: {} native\n", p.modules[m].path.as_str());
+                eprint(
+                    "native: {} {}\n",
+                    p.modules[m].path.as_str(),
+                    if hit.len() != 0 && hit[m] {
+                        "replayed"
+                    } else {
+                        "native"
+                    },
+                );
             }
             continue;
         }
@@ -13655,7 +14248,14 @@ fn native_plan(
         eprint("error: module '{}' does not compile: {}\n", p.modules[m].path.as_str(), w);
     }
     if stats {
-        eprint("native: {} modules compiled, {} refused, {} objects, {} ms\n", nn, nc, np, ticks_ms() - t0);
+        eprint(
+            "native: {} modules compiled, {} refused, {} objects, {} of them reused, {} ms\n",
+            nn,
+            nc,
+            np,
+            nr,
+            ticks_ms() - t0,
+        );
     }
     return ok;
 }
@@ -13804,7 +14404,10 @@ fn bc_job(ctx: *mut void, j: u32) {
             *unsafe &mut *(st.outs + it) = take_errs(&mut tck.errors);
             continue;
         }
-        if kd != loader::ItemKind::IK_FUNCTION as u8 && kd != loader::ItemKind::IK_METHOD as u8 && kd != loader::ItemKind::IK_STRUCT as u8 && kd != loader::ItemKind::IK_ENUM as u8 {
+        if kd != loader::ItemKind::IK_FUNCTION as u8 && kd != loader::ItemKind::IK_METHOD as u8 && kd != loader::ItemKind::IK_STRUCT as u8 && kd != loader::ItemKind::IK_ENUM as u8 && !bc_iface_item(
+            p,
+            &meta,
+        ) {
             continue;
         }
         tck.bc_item(meta.node, &mut slot.ow, &mut slot.ctx, &mut bodies);
@@ -13872,7 +14475,9 @@ fn bc_std_closure(p: &mut loader::Package, st: &BcStage, testing: bool) {
             if reach_root(p, a, m as ModuleId, it.node, testing, false) {
                 bc_queue(&mut queued, &mut round, k);
             }
-            if it.owner != loader::ITEM_NONE && a.ext(p.idx().items.at(it.owner as usize).node).extend_def.interface_type != NODE_NONE {
+            if it.owner != loader::ITEM_NONE && p.idx().items.at(it.owner as usize).kind == loader::ItemKind::IK_EXTEND as u8 && a.ext(
+                p.idx().items.at(it.owner as usize).node,
+            ).extend_def.interface_type != NODE_NONE {
                 let key = fn_name_key(p, m as ModuleId, it.node);
                 if !conf_ix.contains_key(&key) {
                     conf_ix.insert(key, confs.len() as u64);
@@ -13929,6 +14534,19 @@ fn bc_std_closure(p: &mut loader::Package, st: &BcStage, testing: bool) {
                         bc_queue(&mut queued, &mut round, it);
                     }
                 } else if (unsafe &*p.module_ast_const(t.callee.module)).at_const(t.callee.node).kind == NodeKind::NODE_FUNCTION {
+                    // An interface's spec function: its default body.
+                    let ic = (unsafe &*p.module_ast_const(t.callee.module)).container_of(t.callee.node);
+                    let ii = if ic == NODE_NONE {
+                        loader::ITEM_NONE
+                    } else {
+                        p.item_of(t.callee.module, ic)
+                    };
+                    if ii != loader::ITEM_NONE && p.bc_lazy(t.callee.module as usize) && bc_iface_item(
+                        p,
+                        p.idx().items.at(ii as usize),
+                    ) {
+                        bc_queue(&mut queued, &mut round, ii);
+                    }
                     if let Some(x) = conf_ix.get(&fn_name_key(p, t.callee.module, t.callee.node)) {
                         let v = confs.at((*x) as usize);
                         for j in 0..v.len() {
@@ -13999,6 +14617,23 @@ pub(package) const fn bc_body_item(p: &loader::Package, it: &loader::ItemMeta) b
         return false;
     }
     return it.owner == loader::ITEM_NONE || p.idx().items.at(it.owner as usize).kind == loader::ItemKind::IK_EXTEND as u8;
+}
+
+// Whether item `it` is an interface with a spec function's default body: the borrow pass lowers those
+// bodies (`bc_item`), which the proofs read at each conformance that takes the default.
+const fn bc_iface_item(p: &loader::Package, it: &loader::ItemMeta) bool {
+    if it.kind != loader::ItemKind::IK_INTERFACE as u8 {
+        return false;
+    }
+    let a = unsafe &*p.module_ast_const(it.module);
+    let ms = a.ext(it.node).interface_def.items;
+    for j in 0..ms.len {
+        let f = unsafe a.list(ms)[j as usize];
+        if a.at_const(f).kind == NodeKind::NODE_FUNCTION && a.ext(f).function.is_spec() && a.ext(f).function.body != NODE_NONE {
+            return true;
+        }
+    }
+    return false;
 }
 
 /// The borrow stage's prologue: per module, its row of the reference table the borrow jobs query
@@ -15580,28 +16215,49 @@ fn ap_job(ctx: *mut void, j: u32) {
 }
 
 // The proof record of a build tree: the key (`prove_keys`) of each module whose proofs all held, one
-// per line as two hex words.
+// per line as two hex words; `p` lines, the facts its proofs gave; `@d <key> <module> <node> <hash>` lines,
+// the functions of other modules whose bodies its proofs read (`prv::check_kept`), with their text's hash
+// (`tuc::body_hash`). A module's proofs replay when its key is there and every one of its `@d` lines still
+// holds. The key holds what the type check's evaluations ran for the module and its closure
+// (`tuc::ce_sites`: a constant's value).
 const PROVE_RECORD: str<'static> = "__sc_prove";
 
-// The proof key of each module: what its proofs read, the module's own source, the sources of every
-// module it imports or names (`mod_refs`), transitively, and of the prelude, the compiler, the target
-// and the code-generation settings (`prove_cached` adds the bodies the build keeps). Two independent 64-bit lanes per module (`2 * m`, `2 * m + 1`);
-// the set of sources is summed, so the module numbering of a build does not matter.
-fn prove_keys(p: &loader::Package, target: i32) Vector<u64> {
+// The proof key of each module: what its proofs read, the module's own source, what the modules it
+// imports or names (`mod_refs`), transitively, show (their shapes, `tuc::Shapes`, when `sh` holds them,
+// else their sources: the bodies the proofs read count by their `@d` lines), the prelude's sources, the
+// compiler, the target, the code-generation settings and outside std the proof budget (`prove_steps`;
+// `prove_cached` adds the bodies the build keeps and their recursion components). Two independent 64-bit
+// lanes per module (`2 * m`, `2 * m + 1`); the set of modules is summed, so the module numbering of a
+// build does not matter.
+fn prove_keys(p: &loader::Package, target: i32, sh: &tuc::Shapes) Vector<u64> {
     let n = p.modules.len();
     let mut cfg = compiler_id() ^ 0x9E3779B97F4A7C15u64;
     let parts: [u64; 5] = [p.arch as u64, target as u64, p.opt as u64, p.cg, p.bootstrap as u64];
     for j in 0..5 {
         cfg = (cfg ^ parts[j]).wrapping_mul(0x100000001b3u64);
     }
-    // Each module's source, in both lanes, by its file and content.
+    // Each module's source, in both lanes, by its file and content; and what an importer reads of it. Each
+    // with what the type check's evaluations ran for it (`tuc::ce_sites`), and every key with those whose
+    // site is not known.
+    let ceh = tuc::ce_sites(p);
+    cfg = splitmix(cfg ^ ceh[n]);
+    let shaped = sh.mh.len() == n;
     let mut h1 = Vector::<u64>::with_capacity(n);
     let mut h2 = Vector::<u64>::with_capacity(n);
+    let mut s1 = Vector::<u64>::with_capacity(n);
+    let mut s2 = Vector::<u64>::with_capacity(n);
     for m in 0..n {
         let md = p.modules.at(m);
-        let f = fnv_cont(FNV_BASIS, &md.file);
+        let f = fnv_cont(FNV_BASIS, &md.file) ^ ceh[m].rotate_left(7);
         h1.push(splitmix(f ^ md.src_id));
         h2.push(splitmix(f.wrapping_add(md.src_id).rotate_left(29) ^ 0xD6E8FEB86659FD93u64));
+        if shaped && md.has_ast {
+            s1.push(splitmix(f ^ sh.mh[m] ^ 0x5851F42D4C957F2Du64));
+            s2.push(splitmix(f.wrapping_add(sh.mh[m]).rotate_left(17) ^ 0x14057B7EF767814Fu64));
+        } else {
+            s1.push(h1[m]);
+            s2.push(h2[m]);
+        }
     }
     let mut pre1 = cfg;
     let mut pre2 = splitmix(cfg);
@@ -15625,6 +16281,10 @@ fn prove_keys(p: &loader::Package, target: i32) Vector<u64> {
         let tag = m as u32 + 1;
         let mut k1 = pre1 ^ splitmix(h1[m]);
         let mut k2 = pre2 ^ splitmix(h2[m] ^ 1);
+        if p.prove_steps != 0 && !p.in_std(m) {
+            k1 = splitmix(k1 ^ p.prove_steps as u64);
+            k2 = splitmix(k2.wrapping_add(p.prove_steps));
+        }
         work.clear();
         seen.set(m, tag);
         work.push(m as u32);
@@ -15652,8 +16312,8 @@ fn prove_keys(p: &loader::Package, target: i32) Vector<u64> {
         }
         for y in 0..n {
             if seen[y] == tag && y != m {
-                k1 = k1.wrapping_add(h1[y]);
-                k2 = k2.wrapping_add(h2[y]);
+                k1 = k1.wrapping_add(s1[y]);
+                k2 = k2.wrapping_add(s2[y]);
             }
         }
         keys.push(k1);
@@ -15670,9 +16330,25 @@ const fn splitmix(x: u64) u64 {
     return z ^ z >> 31;
 }
 
+// The hex words of record line `s` (to its end), as many as parse.
+fn hex_words(s: str) Vector<u64> {
+    let mut w = Vector::<u64>::new();
+    for part in s.split(" ") {
+        if let Some(v) = parse_hex64(part) {
+            w.push(v);
+        }
+    }
+    return w;
+}
+
+// Whether function `key` (`module << 32 | node`) still has the text hash `h` (`tuc::body_hash`).
+fn read_holds(p: &loader::Package, key: u64, h: u64) bool {
+    return h != 0 && tuc::body_hash(p, key) == h;
+}
+
 // The prover over the kept bodies (`prv::check_kept`), skipping each module whose key the build
-// tree's proof record holds; the record then holds the keys of the modules whose proofs held. No
-// record without a build tree; a failed obligation is never recorded.
+// tree's proof record holds with its reads (`PROVE_RECORD`); the record then holds the keys of the modules
+// whose proofs held. No record without a build tree; a failed obligation is never recorded.
 // The facts the proofs give the build (`facts`: kept index << 32 | rvalue of each bounds check the
 // prover proved, `prv::check_kept`) come from the walk, or for a module the record holds from its
 // `p` lines: `p <module key> <owner module> <owner node> <rvalue>`, so a cached build has the same.
@@ -15683,6 +16359,7 @@ fn prove_cached(
     target: i32,
     tstat: bool,
     facts: &mut Vector<u64>,
+    sh: &tuc::Shapes,
 ) bool {
     if !prv::any_contracts(p) {
         return true;
@@ -15692,27 +16369,67 @@ fn prove_cached(
     skip.resize_default(n);
     let cache = p.gen_root.len() != 0 && compiler_id() != 0;
     let mut keys = if cache {
-        prove_keys(p, target)
+        prove_keys(p, target, sh)
     } else {
         Vector::<u64>::new()
     };
     // A module's proofs are those of the bodies the build keeps of it, which for a std module depend on
-    // the program (`bc_lazy`): the key holds them too.
+    // the program (`bc_lazy`), and of the recursion components they lie in (a `decreases` proof reads
+    // every member's calls): the key holds them too.
     if cache {
+        let mut members = Map::<u32, u64>::new();
+        for k in 0..keep.kept.len() {
+            if k < comp.len() && comp[k] != NONE {
+                let o = keep.kept.at(k).body.owner;
+                let h = splitmix(o.module as u64 << 32 | o.node as u64 ^ 0x632BE59BD9B4E019u64);
+                let c = members.get(&comp[k]).map(|x: &u64| *x).unwrap_or(0);
+                members.insert(comp[k], c.wrapping_add(h));
+            }
+        }
         for k in 0..keep.kept.len() {
             let b = &keep.kept.at(k).body;
             let m = b.module as usize;
-            let h = splitmix(b.owner.module as u64 << 32 | b.owner.node as u64);
+            let mut h = splitmix(b.owner.module as u64 << 32 | b.owner.node as u64);
+            if k < comp.len() && comp[k] != NONE {
+                h = h ^ splitmix(members.get(&comp[k]).map(|x: &u64| *x).unwrap_or(0));
+            }
             keys.set(2 * m, keys[2 * m].wrapping_add(h));
             keys.set(2 * m + 1, keys[2 * m + 1].wrapping_add(splitmix(h ^ 0xC2B2AE3D27D4EB4Fu64)));
         }
+    }
+    // The functions whose bodies each module's proofs read: this build's walk's, or a replayed module's
+    // record's.
+    let mut reads = Vector::<Vector<u64>>::with_capacity(n);
+    for _m in 0..n {
+        reads.push(Vector::<u64>::new());
     }
     let path = build_out_path(&p.gen_root, PROVE_RECORD, "");
     if cache {
         let old = loader::read_file(&path).unwrap_or(String::new());
         let mut have = Map::<u64, u64>::new();
+        // Per key, whether its reads still hold, and the reads.
+        let mut bad = Set::<u64>::new();
+        let mut kreads = Map::<u64, Vector<u64>>::new();
         for line in old.as_str().split("\n") {
             if line.starts_with("p ") {
+                continue;
+            }
+            if line.starts_with("@d ") {
+                let w = hex_words(line.slice(3, line.len()));
+                if w.len() != 4 {
+                    continue;
+                }
+                let key = w[1] << 32 | w[2];
+                if !read_holds(p, key, w[3]) {
+                    bad.insert(w[0]);
+                }
+                if let Some(v) = kreads.get_mut(&w[0]) {
+                    v.push(key);
+                } else {
+                    let mut v = Vector::<u64>::new();
+                    v.push(key);
+                    kreads.insert(w[0], v);
+                }
                 continue;
             }
             let f = line.find(" ");
@@ -15729,8 +16446,13 @@ fn prove_cached(
         }
         for m in 0..n {
             switch have.get(&keys[2 * m]) {
-                Some(b) => skip.set(m, *b == keys[2 * m + 1]),
+                Some(b) => skip.set(m, *b == keys[2 * m + 1] && !bad.contains(&keys[2 * m])),
                 None => {},
+            }
+            if skip[m] {
+                if let Some(v) = kreads.get(&keys[2 * m]) {
+                    reads.set(m, v.clone());
+                }
             }
         }
         // The facts of each module the record lets the build skip.
@@ -15744,12 +16466,7 @@ fn prove_cached(
             if !line.starts_with("p ") {
                 continue;
             }
-            let mut w = Vector::<u64>::new();
-            for part in line.slice(2, line.len()).split(" ") {
-                if let Some(v) = parse_hex64(part) {
-                    w.push(v);
-                }
-            }
+            let w = hex_words(line.slice(2, line.len()));
             if w.len() != 4 || !key_mod.contains_key(&w[0]) {
                 continue;
             }
@@ -15762,8 +16479,8 @@ fn prove_cached(
     }
     // A module the tree's record misses: the shared record of its key (`prove_dir`), from any build tree.
     let shared = cache && p.prove_dir.len() != 0;
+    let mut by_file = Map::<u64, usize>::new();
     if shared {
-        let mut by_file = Map::<u64, usize>::new();
         for m in 0..n {
             by_file.insert(fnv_cont(FNV_BASIS, &p.modules.at(m).file), m);
         }
@@ -15773,8 +16490,12 @@ fn prove_cached(
             }
             let rec = shared_record(p, keys[2 * m], keys[2 * m + 1]);
             if let Some(text) = loader::read_file(&rec) {
-                skip.set(m, true);
-                shared_facts(p, keep, &by_file, &text, facts);
+                let mut rs = Vector::<u64>::new();
+                if shared_reads(p, &by_file, &text, &mut rs) {
+                    skip.set(m, true);
+                    reads.set(m, rs);
+                    shared_facts(p, keep, &by_file, &text, facts);
+                }
             }
         }
     }
@@ -15793,12 +16514,26 @@ fn prove_cached(
         set_stage_locks(p, true);
     }
     let mut fresh = Vector::<u64>::new();
-    let ok = prv::check_kept(p, keep, comp, &skip, &mut held, &mut fresh);
+    let mut walked = Vector::<Vector<u64>>::new();
+    let mut warned: u32 = 0;
+    let mut pl = loader::ProofLint { spent: 0, hints: Vector::<loader::ProofHint>::new() };
+    let ok = prv::check_kept(p, keep, comp, &skip, &mut held, &mut fresh, &mut walked, &mut warned, &mut pl);
     if locks {
         set_stage_locks(p, false);
     }
     for m in 0..n {
         p.modules[m].ast.get_mut().used_rollback(marks[m]);
+        if !skip[m] && m < walked.len() {
+            // Its own bodies count by its source (the key).
+            let mut own = Vector::<u64>::new();
+            for j in 0..walked[m].len() {
+                let r = walked[m][j];
+                if (r >> 32) as usize != m || (r & 0xFFFFFFFF) as NodeId == NODE_NONE {
+                    own.push(r);
+                }
+            }
+            reads.set(m, own);
+        }
     }
     if tstat {
         let mut nh: u32 = 0;
@@ -15812,6 +16547,12 @@ fn prove_cached(
         for m in 0..n {
             if held[m] {
                 out.push_str(format("{:x} {:x}\n", keys[2 * m], keys[2 * m + 1]).as_str());
+                for j in 0..reads[m].len() {
+                    let r = reads[m][j];
+                    out.push_str(
+                        format("@d {:x} {:x} {:x} {:x}\n", keys[2 * m], r >> 32, r & 0xFFFFFFFF, tuc::body_hash(p, r)).as_str(),
+                    );
+                }
             }
         }
         // By each fact's identity, its owner's module and node, then its rvalue: the record's bytes do not
@@ -15850,7 +16591,8 @@ fn prove_cached(
         mkdir_p(&p.gen_root);
         let _ = write_file_atomic(&path, &out);
     }
-    // The shared record of each module this build proved: its facts, each owner by its file, sorted.
+    // The shared record of each module this build proved: its reads and the evaluations' (each function by
+    // its file), then its facts, each owner by its file, sorted.
     if shared {
         let mut lines = Vector::<Vector<String>>::with_capacity(n);
         for _m in 0..n {
@@ -15872,6 +16614,17 @@ fn prove_cached(
             if held[m] && !skip[m] {
                 lines.index_mut(m).sort();
                 let mut body = String::new();
+                for j in 0..reads[m].len() {
+                    let r = reads[m][j];
+                    body.push_str(
+                        format(
+                            "@d {:x} {:x} {}\n",
+                            r & 0xFFFFFFFF,
+                            tuc::body_hash(p, r),
+                            p.modules.at((r >> 32) as usize).file.as_str(),
+                        ).as_str(),
+                    );
+                }
                 for q in 0..lines[m].len() {
                     body.push_str(lines[m].at(q).as_str());
                     body.push_byte(b'\n');
@@ -15889,6 +16642,49 @@ fn prove_cached(
     return ok;
 }
 
+// Whether every `@d` line (`@d <node> <hash> <file>`) of shared proof record `text` still holds in `p`,
+// its functions into `out`.
+fn shared_reads(p: &loader::Package, by_file: &Map<u64, usize>, text: str, out: &mut Vector<u64>) bool {
+    for line in text.split("\n") {
+        if !line.starts_with("@d ") {
+            continue;
+        }
+        let rest = line.slice(3, line.len());
+        let a = rest.find(" ");
+        if a < 0 {
+            return false;
+        }
+        let r2 = rest.slice(a as usize + 1, rest.len());
+        let b = r2.find(" ");
+        if b < 0 {
+            return false;
+        }
+        let file = r2.slice(b as usize + 1, r2.len());
+        let m = switch by_file.get(&fnv_cont(FNV_BASIS, file)) {
+            Some(v) => *v,
+            None => {
+                return false;
+            },
+        };
+        if p.modules.at(m).file.as_str() != file {
+            return false;
+        }
+        switch (parse_hex64(rest.slice(0, a as usize)), parse_hex64(r2.slice(0, b as usize))) {
+            (Some(node), Some(h)) => {
+                let key = m as u64 << 32 | node;
+                if !read_holds(p, key, h) {
+                    return false;
+                }
+                out.push(key);
+            },
+            _ => {
+                return false;
+            },
+        }
+    }
+    return true;
+}
+
 // The shared proof record of the module whose key is `k1`, `k2` (`prove_cached`).
 fn shared_record(p: &loader::Package, k1: u64, k2: u64) String {
     return loader::join2(&p.prove_dir, format("{:x}-{:x}", k1, k2).as_str());
@@ -15898,6 +16694,9 @@ fn shared_record(p: &loader::Package, k1: u64, k2: u64) String {
 // (kept index << 32 | rvalue): an owner the build does not keep gives none.
 fn shared_facts(p: &loader::Package, keep: &irl::Keep, by_file: &Map<u64, usize>, text: str, facts: &mut Vector<u64>) {
     for line in text.split("\n") {
+        if line.starts_with("@") {
+            continue;
+        }
         let a = line.find(" ");
         if a < 0 {
             continue;
@@ -16109,6 +16908,45 @@ pub(package) fn check_package(p: &mut loader::Package, target: i32) bool {
     return p.ok;
 }
 
+// `lint --proofs`: the prover over the kept bodies of the reported modules, its failures errors and its
+// costly proofs warnings (`prv::check_kept`).
+fn lint_proofs(p: &mut loader::Package, keep: &irl::Keep, comp: &Vector<u32>, only_mod: i32) {
+    if !prv::any_contracts(p) {
+        return;
+    }
+    let n = p.modules.len();
+    let mut skip = Vector::<bool>::with_capacity(n);
+    for m in 0..n {
+        skip.push(!p.modules[m].has_ast || !lint_reported(p, m, only_mod));
+    }
+    let mut held = Vector::<bool>::with_capacity(n);
+    held.resize_default(n);
+    // As in a build (`prove_cached`): the types the proofs touch are no use by the program, and several
+    // workers use the evaluator under the stage locks.
+    let locks = p.jobs != 1;
+    let mut marks = Vector::<u64>::with_capacity(n);
+    for m in 0..n {
+        marks.push(p.modules[m].ast.get_ref().used_mark());
+    }
+    if locks {
+        set_stage_locks(p, true);
+    }
+    let mut facts = Vector::<u64>::new();
+    let mut walked = Vector::<Vector<u64>>::new();
+    let mut warned: u32 = 0;
+    let mut pl = loader::ProofLint { spent: 0, hints: Vector::<loader::ProofHint>::new() };
+    let ok = prv::check_kept(p, keep, comp, &skip, &mut held, &mut facts, &mut walked, &mut warned, &mut pl);
+    if locks {
+        set_stage_locks(p, false);
+    }
+    for m in 0..n {
+        p.modules[m].ast.get_mut().used_rollback(marks[m]);
+    }
+    p.ok = ok && p.ok;
+    p.lint_warnings = p.lint_warnings + warned;
+    p.proof_lint = pl;
+}
+
 pub(package) fn lint_package(
     p: &mut loader::Package,
     target: i32,
@@ -16183,6 +17021,9 @@ pub(package) fn lint_package(
         p.ok = check_recursion(p, &lkeep, lint_mod as i32, &mut comp) && p.ok;
         lint_discarded_results(p, lint_mod as i32);
         lint_unused_members(p, lint_mod as i32);
+        if p.lint_proofs && p.ok {
+            lint_proofs(p, &lkeep, &comp, lint_mod as i32);
+        }
     }
     lint_unused_imports(p, lint_mod as i32, fixes);
     lint_feature_unsafe(p, lint_mod as i32, fixes);
@@ -16834,7 +17675,17 @@ pub(package) fn run_package(
     // An ERROR on every build, over every module: a contract the prover cannot prove (`-fno-prove` skips it).
     if (p.cg & bman::CG_NO_PROVE) == 0 {
         let mut facts = Vector::<u64>::new();
-        p.ok = prove_cached(p, &irkeep, &comp, target, tstat, &mut facts) && p.ok;
+        let groot = p.gen_root.clone();
+        let shp = tuc::shapes_early(p, &groot);
+        p.ok = prove_cached(p, &irkeep, &comp, target, tstat, &mut facts, &shp) && p.ok;
+        // Per function, the hash of its proved checks (`Package.prove_fd`): its code's and its copies' key.
+        for j in 0..facts.len() {
+            let o = irkeep.kept.at((facts[j] >> 32) as usize).body.owner;
+            let key = o.module as u64 << 32 | o.node as u64;
+            let h = splitmix(key ^ (facts[j] & 0xFFFFFFFFu64) << 32 ^ 0x2545F4914F6CDD1Du64);
+            let s = p.prove_fd.get(&key).map(|x: &u64| *x).unwrap_or(0);
+            p.prove_fd.insert(key, s.wrapping_add(h));
+        }
         // Each bounds check the prover proved is its PROVEN twin before the inliner, the instances and
         // the emitters copy the body (step 6: proved contracts and pattern types are facts).
         for j in 0..facts.len() {
@@ -16864,8 +17715,11 @@ pub(package) fn run_package(
         // the constant pass before emission lowers again the few it needs.
         let bm = unsafe (*cirf).body_mark();
         // An ERROR, not a lint: it runs on every build (user modules; std is gated by check.sh's
-        // explicit std lint invocations).
+        // explicit std lint invocations). Its runs reach no code: the functions they read are no
+        // dependency of the code (`Interp.reads`); a constant they compute keeps its own (`rdeps`).
+        let rd = replace(unsafe &mut (*cirf).reads, null);
         check_always_panics(p, -1);
+        unsafe (*cirf).reads = rd;
         stage_ms(tstat, &mut tp0, "phase panics");
         if tstat {
             eprint(
@@ -16974,13 +17828,14 @@ pub(package) fn run_package(
         }
     }
     stage_ms(tstat, &mut tp0, "phase mid");
-    if p.native {
+    // The C tree's constant-time functions compile natively too (`ct_object`): their C types need the facts.
+    if p.native || lct::loaded(p) {
         native_header_facts(p);
         stage_ms(tstat, &mut tp0, "phase native facts");
     }
-    if p.native || cbe::lir_requested(p) {
-        lir_lines(p);
-    }
+    // Every emitting build: the LIR's locations, and the per-TU cache's keys, which hash the lines of
+    // the functions a module's code copies (`tuc::dep_hash`).
+    lir_lines(p);
     // The installed hooks' stage before the emission (`build_system::ext`): an error leaves the tree as it is.
     if !ext::run_stage(ext::STAGE_BEFORE_EMISSION, p, null) {
         return 1;
@@ -17103,6 +17958,12 @@ pub(package) fn run_package(
     let mut nat_mod = Vector::<bool>::new(); // per module, native
     let mut nat_rec = Map::<String, u64>::new();
     let nat_rp = build_out_path(root, NAT_RECORD, "");
+    let nat_kp = build_out_path(root, NAT_KEYS, "");
+    // The earlier record's entries (`NAT_KEYS`), read before this build replaces its objects, and this
+    // build's lines by object path, written once the tree is pruned (`write_nat_keys`).
+    let mut nat_prev = Map::<String, NatKey>::new();
+    let mut nat_lines = Map::<String, String>::new();
+    let mut nat_write = false;
     // Every module compiled natively: the registry is a native object too, and no C object links.
     let mut nat_all = false;
     if co.lir.is_some() && !err {
@@ -17117,7 +17978,22 @@ pub(package) fn run_package(
             }
         }
         if let Some(l) = &co.lir {
-            if !native_plan(p, l, &lm, &iq, root, &co.tuc_hit, &nat_rec, &mut co.asm_text, &mut nat_mod, &mut nat_objs) {
+            if co.tuc_path.len() != 0 {
+                nat_prev = nat_keys(&nat_kp, root);
+            }
+            if !native_plan(
+                p,
+                l,
+                &lm,
+                &iq,
+                root,
+                &co.tuc_hit,
+                &nat_rec,
+                &nat_prev,
+                &mut co.asm_text,
+                &mut nat_mod,
+                &mut nat_objs,
+            ) {
                 return 1;
             }
         }
@@ -17417,6 +18293,7 @@ pub(package) fn run_package(
                 wps.push(ops.at(k).clone());
             }
         }
+        let _ = fs::unlink(&nat_kp);
         let mut orc = Vector::<i32>::new();
         publish_batch(&wps, &ots, &ols, &mut orc, p.jobs, false);
         let mut w: usize = 0;
@@ -17426,6 +18303,10 @@ pub(package) fn run_package(
             if ob.old {
                 sink_notify(osink, &mut co.pr, &op, "", 3, false);
                 nat_paths.push(op.clone());
+                // A reused object's bytes, read to check them, go to the link from memory.
+                if ob.bytes.len() != 0 {
+                    unsafe (*memp).objs.insert(op.clone(), replace(&mut ob.bytes, Vector::<u8>::new()));
+                }
                 keep.push(op);
                 continue;
             }
@@ -17490,6 +18371,18 @@ pub(package) fn run_package(
         } else {
             let _ = fs::unlink(&nat_rp);
         }
+        // The objects' keys and the hashes of their bytes, by path below the root.
+        if !err && co.tuc_path.len() != 0 {
+            nat_write = true;
+            for k in 0..nat_objs.len() {
+                let ob = nat_objs.at(k);
+                if ob.key != 0 {
+                    let op = nat_obj_path(root, &p.modules[ob.m as usize].path, ob.own, ob.piece);
+                    let ln = nat_key_line(ob.key, ob.chash, op.as_str().slice(root.len() + 1, op.len()));
+                    nat_lines.insert(op, ln);
+                }
+            }
+        }
     }
     if stdlib::getenv("SC_CEMIT_STATS") != null {
         eprint("cemit-stage write: {} ms\n", ticks_ms() - tw0);
@@ -17530,6 +18423,9 @@ pub(package) fn run_package(
     // sources.
     if root.len() != 0 && !fresh_tree && wtree {
         prune_orphans(root, &keep);
+    }
+    if nat_write {
+        write_nat_keys(&nat_kp, root, &nat_prev, &mut nat_lines);
     }
     // Every file is on disk: the link and the run below read the tree. Of the output only its probe is
     // read again (the test runner's notice).
@@ -17702,8 +18598,52 @@ fn native_registry(p: &loader::Package, zst: &Vector<u64>, roots: str, out: &mut
         }
         t.format_into("data @__sc_zst_{} size 1 align {}\n", zst[i], lg);
     }
-    if p.simd_levels.len() != 0 && p.names_vectors() {
+    let levels = p.simd_levels.len() != 0 && (p.names_vectors() || p.levels_add_scalar());
+    if levels {
         simd_level_init(p, int, &mut t);
+    }
+    // `getauxval`'s symbol, once.
+    let mut auxv = levels && p.simd_hwcap.len() != 0 && p.find("sc_cpu") < 0;
+    if dit_byte(p) {
+        // The byte the constant-time bodies read (`Target.dit`): HWCAP_DIT of AT_HWCAP (16).
+        let sec = ctor_section(p);
+        if !auxv {
+            t.push_str("sym @getauxval fn global ext\n");
+            auxv = true;
+        }
+        t.format_into(
+            "sym @__sc_dit data global\nsym @__sc_dit_init fn local\nsym @__sc_dit_ctor data local used section \"{}\"\n",
+            sec,
+        );
+        t.push_str(
+            "fn @__sc_dit_init\n  sig () -> void\nb0:\n  v0 = iconst.i64 16\n  v1 = call.i64 @getauxval(v0) : (i64) -> i64\n",
+        );
+        t.format_into(
+            "  v2 = iconst.i64 {}\n  v3 = and.i64 v1, v2\n  v4 = iconst.i64 0\n  v5 = icmp.ne v3, v4\n  v6 = zext.i8 v5\n",
+            tgt::DIT_HWCAP_BIT as i64,
+        );
+        t.push_str("  v7 = symaddr @__sc_dit\n  store v6, v7 align 0\n  ret\ndata @__sc_dit size 1 align 0\n");
+        t.format_into("data @__sc_dit_ctor size {} align {} reloc 0 @__sc_dit_init\n", ptr, al);
+    }
+    if cbe::sve_byte(p) {
+        // The byte the masked last iterations test (`lir::ir::SYS_SVE`): HWCAP_SVE of AT_HWCAP (16).
+        let sec = ctor_section(p);
+        if !auxv {
+            t.push_str("sym @getauxval fn global ext\n");
+        }
+        t.format_into(
+            "sym @__sc_sve data global\nsym @__sc_sve_init fn local\nsym @__sc_sve_ctor data local used section \"{}\"\n",
+            sec,
+        );
+        t.push_str(
+            "fn @__sc_sve_init\n  sig () -> void\nb0:\n  v0 = iconst.i64 16\n  v1 = call.i64 @getauxval(v0) : (i64) -> i64\n",
+        );
+        t.format_into(
+            "  v2 = iconst.i64 {}\n  v3 = and.i64 v1, v2\n  v4 = iconst.i64 0\n  v5 = icmp.ne v3, v4\n  v6 = zext.i8 v5\n",
+            tgt::SVE_HWCAP_BIT as i64,
+        );
+        t.push_str("  v7 = symaddr @__sc_sve\n  store v6, v7 align 0\n  ret\ndata @__sc_sve size 1 align 0\n");
+        t.format_into("data @__sc_sve_ctor size {} align {} reloc 0 @__sc_sve_init\n", ptr, al);
     }
     let mut err = String::new();
     let mut ok = false;
@@ -17733,16 +18673,36 @@ fn native_registry(p: &loader::Package, zst: &Vector<u64>, roots: str, out: &mut
     return ok;
 }
 
+// Whether the program's start-up sets `__sc_dit`, the byte its arm64 constant-time bodies read: on a
+// target whose kernel reports FEAT_DIT (`Target.dit`), for a program that may have such bodies (`lct::loaded`).
+fn dit_byte(p: &loader::Package) bool {
+    let d = switch tgt::target_of(p.build_target, p.arch) {
+        Some(r) => r.dit,
+        None => tgt::DIT_NONE,
+    };
+    return d == tgt::DIT_HWCAP && lct::loaded(p);
+}
+
 // The level the native copies of a program with run-time copies run at (`simd_levels`; the C tree's
-// `simd_level_fn`), as LIR into `t`: the byte `__sc_simd_lv` every dispatching function reads, 0 (the
-// build's features) until the constructor `__sc_simd_init` sets it before `main` to the highest level k
-// (1-based) whose features the CPU detector reports (`sc_cpu_words`). `SC_SIMD_LEVEL=<k>` (a test switch)
-// sets it, up to the highest. `int` is the pointer-sized integer type.
+// `simd_level_fn`), as LIR into `t`: the byte `__sc_simd_lv` every dispatching function and copy stub
+// reads, 0 (the build's features) until the constructor `__sc_simd_init` sets it before `main` to the
+// highest level k (1-based) whose features the CPU has: by the CPU detector (`sc_cpu_words`) where the
+// program loads it (vector code), by the kernel's HWCAP and HWCAP2 bits for a target's run-time levels
+// (`Target.run_time_hwcap`, `getauxval`), else (x86-64 code without vectors, whose copies take scalar
+// instructions alone: `lir::ir::CPU_SCALAR`) by CPUID and XGETBV for the scalar features of each level.
+// `SC_SIMD_LEVEL=<k>` (a test switch) sets it, up to the highest. `int` is the pointer-sized integer type.
 fn simd_level_init(p: &loader::Package, int: str, t: &mut String) {
     let n = p.simd_levels.len();
     let sec = ctor_section(p);
     let ptr = lay::target_for(p.arch).ptr as u32;
-    t.push_str("sym @__sc_simd_lv data global\nsym @getenv fn global ext\nsym @sc_cpu_words fn global\n");
+    let det = p.find("sc_cpu") >= 0;
+    let hwcap = !det && p.simd_hwcap.len() != 0;
+    t.push_str("sym @__sc_simd_lv data global\nsym @getenv fn global ext\n");
+    if det {
+        t.push_str("sym @sc_cpu_words fn global\n");
+    } else if hwcap {
+        t.push_str("sym @getauxval fn global ext\n");
+    }
     t.format_into(
         "sym @__sc_simd_env data local\nsym @__sc_simd_init fn local\nsym @__sc_simd_ctor data local used section \"{}\"\n",
         sec,
@@ -17759,42 +18719,122 @@ fn simd_level_init(p: &loader::Package, int: str, t: &mut String) {
     t.push_str("  v10 = iconst.i32 10\n  v11 = icmp.ult v9, v10\n  br v11, b2, b3\n");
     t.format_into("b2:\n  v12 = iconst.i32 {}\n  v13 = icmp.ult v9, v12\n  v14 = select.i32 v13, v9, v12\n", n);
     t.push_str("  v15 = trunc.i8 v14\n  astore v15, v0 relaxed\n  ret\n");
-    // The detector's two words against each level's, the highest first: block b(4 + 2i) tests level
-    // n - i, b(5 + 2i) sets it.
-    t.push_str("b3:\n  v16 = slotaddr s0\n  call @sc_cpu_words(v16) : (ptr) -> void\n  v17 = load.i64 v16 align 3\n");
-    t.push_str("  v18 = load.i64 v16+8 align 3\n  jmp b4\n");
-    let mut v: usize = 19;
+    // The two words each level is tested against, `wa` and `wb`, then the next value's number.
+    let (wa, wb, mut v) = if det {
+        t.push_str(
+            "b3:\n  v16 = slotaddr s0\n  call @sc_cpu_words(v16) : (ptr) -> void\n  v17 = load.i64 v16 align 3\n",
+        );
+        t.push_str("  v18 = load.i64 v16+8 align 3\n  jmp b4\n");
+        (17usize, 18usize, 19usize)
+    } else if hwcap {
+        // AT_HWCAP is 16, AT_HWCAP2 26.
+        t.push_str(
+            "b3:\n  v16 = iconst.i64 16\n  v17 = call.i64 @getauxval(v16) : (i64) -> i64\n  v18 = iconst.i64 26\n",
+        );
+        t.push_str("  v19 = call.i64 @getauxval(v18) : (i64) -> i64\n  jmp b4\n");
+        (17usize, 19usize, 20usize)
+    } else {
+        // One word of the scalar features (`X_*` bits), each read where its CPUID leaf exists: leaf 1 ECX
+        // (POPCNT 23, MOVBE 22, FMA 12 with the OS's AVX state: OSXSAVE 27 and XCR0 bits 1 and 2), leaf 7
+        // EBX (BMI1 3, BMI2 8), leaf 0x80000001 ECX (LZCNT 5).
+        t.push_str(
+            "b3:\n  v16 = slotaddr s0\n  v17 = iconst.i32 0\n  sys.cpuid v16, v17, v17\n  v18 = load.i32 v16 align 2\n",
+        );
+        t.push_str("  v19 = iconst.i32 1\n  sys.cpuid v16, v19, v17\n  v20 = load.i32 v16+8 align 2\n");
+        t.push_str(
+            "  v21 = iconst.i32 7\n  sys.cpuid v16, v21, v17\n  v22 = load.i32 v16+4 align 2\n  v23 = icmp.uge v18, v21\n",
+        );
+        t.push_str("  v24 = select.i32 v23, v22, v17\n  v25 = iconst.i32 -2147483648\n  sys.cpuid v16, v25, v17\n");
+        t.push_str("  v26 = load.i32 v16 align 2\n  v27 = iconst.i32 -2147483647\n  sys.cpuid v16, v27, v17\n");
+        t.push_str("  v28 = load.i32 v16+8 align 2\n  v29 = icmp.uge v26, v27\n  v30 = select.i32 v29, v28, v17\n");
+        t.push_str(
+            "  v31 = iconst.i32 134217728\n  v32 = and.i32 v20, v31\n  v33 = icmp.ne v32, v17\n  br v33, b4, b5(v17)\n",
+        );
+        t.push_str(
+            "b4:\n  v34 = sys.xgetbv.i64 v17\n  v35 = trunc.i32 v34\n  v36 = iconst.i32 6\n  v37 = and.i32 v35, v36\n",
+        );
+        t.push_str("  v38 = icmp.eq v37, v36\n  v39 = zext.i32 v38\n  jmp b5(v39)\nb5(v40: i32):\n");
+        // The word: POPCNT 1, MOVBE 2, FMA 4, LZCNT 8, BMI1 16, BMI2 32.
+        let bits: [(usize, u32, u32); 6] = [(20, 23, 1), (20, 22, 2), (20, 12, 4), (30, 5, 8), (24, 3, 16), (24, 8, 32)];
+        let mut w: usize = 41;
+        t.push_str("  v41 = iconst.i32 0\n");
+        for q in 0..6usize {
+            let (src, bit, out) = bits[q];
+            t.format_into("  v{} = iconst.i32 {}\n  v{} = lshr.i32 v{}, v{}\n", w + 1, bit, w + 2, src, w + 1);
+            t.format_into("  v{} = iconst.i32 1\n  v{} = and.i32 v{}, v{}\n", w + 3, w + 4, w + 2, w + 3);
+            if out == 4 {
+                // FMA only with the OS's AVX state.
+                t.format_into("  v{} = and.i32 v{}, v40\n", w + 5, w + 4);
+            } else {
+                t.format_into("  v{} = or.i32 v{}, v{}\n", w + 5, w + 4, w + 4);
+            }
+            t.format_into("  v{} = iconst.i32 {}\n  v{} = mul.i32 v{}, v{}\n", w + 6, out, w + 7, w + 5, w + 6);
+            t.format_into("  v{} = or.i32 v{}, v{}\n", w + 8, w, w + 7);
+            w += 8;
+        }
+        t.format_into("  v{} = zext.i64 v{}\n  v{} = iconst.i64 0\n  jmp b6\n", w + 1, w, w + 2);
+        (w + 1, w + 2, w + 3)
+    };
+    // Each level's two words against the CPU's, the highest first: block b(first + 2i) tests level n - i,
+    // b(first + 2i + 1) sets it; past them the byte stays 0.
+    let first: usize = ast::pick(det || hwcap, 4usize, 6usize);
     for i in 0..n {
-        let w = p.simd_levels[n - 1 - i].w;
+        let k = n - 1 - i;
+        let m = if det {
+            p.simd_levels[k].w
+        } else if hwcap {
+            [p.simd_hwcap[2 * k], p.simd_hwcap[2 * k + 1]]
+        } else {
+            [scalar_word(p, p.simd_levels[k]), 0u64]
+        };
+        let tb = first + 2 * i;
+        let sb = first + 2 * i + 1;
+        let nb = ast::pick(i + 1 == n, first + 2 * n, first + 2 * i + 2);
         t.format_into(
-            "b{}:\n  v{} = iconst.i64 {}\n  v{} = and.i64 v17, v{}\n  v{} = icmp.eq v{}, v{}\n",
-            4 + 2 * i,
+            "b{}:\n  v{} = iconst.i64 {}\n  v{} = and.i64 v{}, v{}\n  v{} = icmp.eq v{}, v{}\n",
+            tb,
             v,
-            w[0] as i64,
+            m[0] as i64,
             v + 1,
+            wa,
             v,
             v + 2,
             v + 1,
             v,
         );
         t.format_into(
-            "  v{} = iconst.i64 {}\n  v{} = and.i64 v18, v{}\n  v{} = icmp.eq v{}, v{}\n",
+            "  v{} = iconst.i64 {}\n  v{} = and.i64 v{}, v{}\n  v{} = icmp.eq v{}, v{}\n",
             v + 3,
-            w[1] as i64,
+            m[1] as i64,
             v + 4,
+            wb,
             v + 3,
             v + 5,
             v + 4,
             v + 3,
         );
-        t.format_into("  v{} = and.i8 v{}, v{}\n  br v{}, b{}, b{}\n", v + 6, v + 2, v + 5, v + 6, 5 + 2 * i, 6 + 2 * i);
-        t.format_into("b{}:\n  v{} = iconst.i8 {}\n  astore v{}, v0 relaxed\n  ret\n", 5 + 2 * i, v + 7, n - i, v + 7);
+        t.format_into("  v{} = and.i8 v{}, v{}\n  br v{}, b{}, b{}\n", v + 6, v + 2, v + 5, v + 6, sb, nb);
+        t.format_into("b{}:\n  v{} = iconst.i8 {}\n  astore v{}, v0 relaxed\n  ret\n", sb, v + 7, k + 1, v + 7);
         v += 8;
     }
-    t.format_into("b{}:\n  ret\n", 4 + 2 * n);
+    t.format_into("b{}:\n  ret\n", first + 2 * n);
     t.push_str("data @__sc_simd_lv size 1 align 0\n");
     t.push_str("data @__sc_simd_env size 14 align 0 ro bytes 53435f53494d445f4c4556454c00\n");
     t.format_into("data @__sc_simd_ctor size {} align {} reloc 0 @__sc_simd_init\n", ptr, pick(ptr == 4, 2u32, 3u32));
+}
+
+// The word of feature set `s`'s x86-64 scalar features the CPUID path of `simd_level_init` tests: POPCNT 1,
+// MOVBE 2, FMA 4, LZCNT 8, BMI1 16, BMI2 32.
+const fn scalar_word(p: &loader::Package, s: cf::CpuFeatureSet) u64 {
+    let names: [str; 6] = ["popcnt", "movbe", "fma", "lzcnt", "bmi1", "bmi2"];
+    let mut w: u64 = 0;
+    for q in 0..6usize {
+        let f = cf::find(names[q], p.arch);
+        if f >= 0 && cf::has(s, f as usize) {
+            w |= 1u64 << q as u64;
+        }
+    }
+    return w;
 }
 
 /// The measured cost of one runtime task (launch, run, join; 0.7 to 1.0 us over 20k empty tasks

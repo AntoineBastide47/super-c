@@ -1,8 +1,8 @@
 # Syntax ownership: the body arena
 
 Every module keeps two syntax arenas (`src/ast/ast.spc`). The module arena (`Ast.nodes`,
-`Ast.children`) holds the declarations, every signature, every constant initializer and
-every pinned body. The body arena (`Ast.b`) holds the releasable bodies: the block of every
+`Ast.children`) holds the declarations, every signature, every constant initializer and,
+past them, every pinned body. The body arena (`Ast.b`) holds the releasable bodies: the block of every
 function that is not generic, not `const fn`, not an interface member and not a member of
 a generic `extend`, with the nodes a desugar appends to such a body. The driver frees the
 body arenas once the last reader of body syntax has run, after the instance graph and
@@ -60,6 +60,17 @@ arena because a later reader needs them after the release: a local `const` (its 
 enter a type) and the target of `dyn` (a `dyn fn` signature node is the identity of its type,
 which emission spells, see `Parser::parse_dyn_target`).
 
+A pinned body (a generic function's, a `const fn`'s, an interface default, a generic extend's
+member) parses after the module's last item and its root (`Parser::parse_deferred`):
+`parse_function` skips the block's tokens (`block_end`) and leaves `BODY_DEFERRED` in the body
+field, and the bodies then parse in source order into the module arena from `Ast.decl_end` on
+(`Ast::past_decls`), each with its named returns' bindings first, so its block is the last node
+of its run. An edit inside a pinned body keeps the id of every declaration, which the per-TU
+cache's sections name. A parse with any diagnostic parses the module again in source order
+(`build_ast`), so the diagnostics keep their order and their recovery. The owner of a node past
+the declarations is the function whose run holds it, an interface's members' runs being the
+interface's (`graph::items::run_slot`, `ItemSched.pin_hi`).
+
 Contract clauses are body syntax: a function's `requires`, `ensures` and `decreases` parse after
 the sink turns on for its body, a loop's `invariant` and `decreases` with the loop. An interface's
 method without a body has no body arena, so its clauses parse into the module arena. The clause
@@ -74,8 +85,9 @@ Rules for every scan and every table indexed by node id:
   live module-arena length.
 - Index a per-node scratch table by `dense(id)`, never by the raw id; test membership with
   `valid(id)`. A raw body id is above `NODE_BODY` and a table sized to it costs a gigabyte.
-- Ordering by id holds inside one arena (post-order: children before parents). Across
-  arenas a body id sorts after every module id.
+- Ordering by id holds inside one arena (post-order: children before parents), except that a
+  pinned body follows every declaration (below). Across arenas a body id sorts after every
+  module id.
 - Closure symbols spell `closure_<node>` for a module-arena closure and
   `closure_b<index>` for a body-arena one (`Mangler::closure_sym`).
 

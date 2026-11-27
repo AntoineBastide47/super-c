@@ -220,7 +220,21 @@ super-c lint --fix           # apply machine fixes, re-lint to fixpoint
 super-c lint --const         # flag functions provably const-evaluable
 super-c lint --fix --const   # make those functions const, save compile time
 super-c lint --target=linux --arch=x86_64 --target-cpu=x86-64-v3   # another target's items and features
+super-c lint --proofs        # also prove the contracts; flag costly asserts with a proved lemma rewrite
+super-c lint --proofs --fix  # also remove the proof steps no proof needs
 ```
+
+`--proofs` proves the contracts of the linted files and records the solver steps of each obligation.
+An `assert` whose condition or `by` block splits the paths (`||`, `==>`, `if`) and makes the
+obligations after it prove on 4 or more paths for 50000 steps or more (`proof_paths`), or whose own
+proof takes 200000 steps or more (`proof_cost`), gets a lemma rewrite: the condition as the
+`ensures`, the `by` block as the body, the locals it names as parameters, and the parts of the
+function's `requires` over them. The lint applies the rewrite to a copy of the file, proves the
+function and its lemmas again (on top of the function's rewrites it kept), and shows the warning
+with the lemma and the call (`= help:`) only when they prove in 90% of the steps or fewer; it shows
+nothing for another. With `--fix`, a file whose proofs take 20000 steps or more loses each lemma call,
+and each assert inside a lemma or inside another assert's `by` block, whose removal keeps every proof
+of the file within its first steps; an unneeded assert of a function's body is reported, not removed.
 
 Two default lints write the shorter forms, with fixes: a qualified variant value that resolves bare
 (`Option::Some(x)` to `Some(x)` through the expected type or as a prelude variant; a qualifier with
@@ -307,7 +321,7 @@ An analysis round reports what `super-c build` reports up to the borrow check: p
 and type errors, the feature errors, the always-panics check (an error, with or without lints),
 the deferred static_asserts and constants, the lints and the package-wide unused-item lint (only
 for a package without an analysis error), with the profile names, the constant engine budgets
-(`const-eval-steps`, `const-eval-memory`) and the CPU level and features (`target-cpu`,
+(`const-eval-steps`, `const-eval-memory`), the proof budget (`prove-steps`) and the CPU level and features (`target-cpu`,
 `target-features`, at the `debug` profile, as `super-c build` takes them) of the nearest
 `build.toml`; without one, the target's baseline features (`lsp_build_settings`).
 It publishes, then the borrow round (`Server::borrowck_round`) runs the borrow checks the round

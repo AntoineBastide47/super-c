@@ -120,7 +120,12 @@ set first: it states the value, register and frame model.
      renames an operand that ends there takes it: arm64 `takes`, x86-64 `def_over`). Then `seg_leave`,
      and bind each listed segment whose value an earlier block defines (`seg_bind`: a temporary in the
      register leaves it first, `vacate_temp`); store a parameter that keeps a stack home and load one
-     that arrived in memory or in a slot.
+     that arrived in memory or in a slot. A temporary bound to a register of the plan (a loop step
+     in its parameter's register: x86-64 `def_shared`, arm64 `step_into`) is bound as any result
+     (`Core::bind`: dirty), so `vacate_temp` stores it to a home when it is still read.
+   - An instruction the generator reports as writing no home (`calls`: x86-64 `float_reg`, `vop_reg`)
+     writes no register a value of the plan holds: an encoding with a fixed register (SSE4.1's
+     `blendvps` mask in xmm0) takes another form when such a value is there.
    - A definition takes the plan's register (`seg_take`). When an operand the instruction still
      reads holds that register, only an emitter that reads its operands before it writes its result
      may write it (arm64: `def_step` sets `stepping`; x86-64: `def_over` and `def_pass` name the
@@ -225,10 +230,12 @@ section symbol (`ob::ORel.part`: no global symbol a shared object could interpos
   float arithmetic with the overflow forms (two results: the value and a flag); comparisons and
   `select`; conversions; `ptradd`, loads, stores, `memcpy`, `memset`; atomics and fences; calls (direct,
   indirect, variadic); `O_VOP` (vector operations by `ir::core` SIMD code); `O_SYS` (system operations:
-  barriers, cycle counter, floating-point control state, the context switch); `O_ASM`; terminators.
+  barriers, cycle counter, floating-point control state, the context switch, arm64's `sys.sve`, which
+  loads the start-up's byte `__sc_sve`, through its address slot in a shared library); `O_ASM`;
+  terminators.
 - Vectors of a register's size may live in vector registers (`vec_homes`: a vector some instruction
   reads or defines in memory stays there). Register forms: lane-wise arithmetic, comparisons, selects,
-  splats, wide constants, `vunzip`, `vziplo`/`vziphi`, lane extracts and inserts (`vlane`), the `O_VOP`s
+  splats, wide constants, `vunzip`, `vziplo`/`vziphi`, lane extracts and inserts (`vlane`; x86-64 4- and 8-byte integer inserts by PINSRD/PINSRQ with SSE4.1, else through memory), the `O_VOP`s
   with a form (`vop_reg`, arm64: NEON lane rules, masks, choices, bitcasts, shifts by a scalar,
   unchecked gathers, masked loads and stores, absolute differences), conversions (`conv_reg`: arm64
   each `Isa.vector_ops` allows; x86-64 SSE2 for integers to twice or half their width, i32 and f32, f32
@@ -258,7 +265,13 @@ section symbol (`ob::ORel.part`: no global symbol a shared object could interpos
   product with one use that a sum or difference reads accumulates into it (arm64 MLA, MLS, SMLAL, UMLAL,
   SMLSL, UMLSL), and a right shift by an immediate into a sum (USRA, SSRA); `lv::FOLD_ADDSUB`, a lane
   select by an even-lanes mask of a float difference and sum is x86-64's `addsubps` or `addsubpd` (SSE3;
-  `FOLD_ADDSUB_WIDE` of 32 bytes with AVX). An 8-byte vector moves to an integer register by FMOV (arm64)
+  `FOLD_ADDSUB_WIDE` of 32 bytes with AVX); `lv::FOLD_PRED` (arm64), a masked load or store through a
+  pointer whose mask is a lane comparison's bits or a lane mask's, where the body has SVE
+  (`Live.pred_all`, `Cpu.vpred`) or the access carries `VOP_PRED`: `ptrue p7` of the vector's lanes, the
+  SVE comparison (`SVE_CMP`) or `cmpne #0` into `p0`, reused within a block, then LD1/ST1 (a zero fallback
+  is the zeroing form; a lane mask's other fallback a BIF); a later `vsel` of the block by the same
+  comparison's or lane mask's lanes is SVE's SEL by `p0` (`holds_pred`), and a lane comparison only such
+  selects read emits nothing (`Live::pred_sels`). An 8-byte vector moves to an integer register by FMOV (arm64)
   or MOVQ (x86-64).
 - Extension folds (arm64, `lv::FOLD_XUSE`): a 64-bit zero or sign extension of a 32-bit value that only
   comparisons with a register and the indices of address sums read takes no register: each use extends
@@ -334,11 +347,22 @@ section symbol (`ob::ORel.part`: no global symbol a shared object could interpos
 - x86-64 folds single-use f32/f64 loads into the right memory operand of scalar arithmetic
   (`FOLD_LDOP`). Preserve operand order and reject intervening memory writes.
 - `O_ASM` and module-level assembly assemble through the instruction table (`src/target/assembler.spc`
-  for directives, labels and sections; the instruction set's assembler for instructions).
+  for directives, labels and sections; the instruction set's assembler for instructions). A second
+  entry into a function's code (`.alt_entry name`, Apple's spelling, on every format) gets `SF_ALT`:
+  Mach-O writes `N_ALT_ENTRY` (with `MH_SUBSECTIONS_VIA_SYMBOLS` the linker keeps it with the code
+  before it), and `place::parts_of` splits no function section at it; a branch between the entries
+  keeps its relocation (`one_part`). The arm64 tables hold SME's ZA tile operands, the 16-bit half
+  tiles (`C::ZH`) of SME2's two-way SMOPA, SMOPS, UMOPA and UMOPS among them.
 - x86-64: a body compiled for AVX2 emits the VEX form of every SSE operation (`x::Code.vex`), also
   of an intrinsic template's legacy statements. A legacy SSE operation the generator or a template
-  uses needs its VEX.128 row (`v` and the mnemonic) in `x64tab` and its shape in `x::vex_shape`;
+  uses needs its VEX.128 row (`v` and the mnemonic) in `x64tab` and its shape in `x::vex_shape`
+  (`x::sse_op`: not SHA's legacy-only operations);
   `x64_sse_operations_take_vex_forms` checks every legacy row.
+- arm64 constant-time bodies with `lir::Package.dit` save PSTATE.DIT in a frame slot at entry, set it
+  with an ISB unless set (`dit_on`; on Linux only where the registry's byte `__sc_dit` says HWCAP has
+  it), and restore it at each return: no tail call or shrink-wrapping in such a body.
+- Scalar copy levels (`place::copy_levels`, `copy_differs`): see super-c-compiler-internals
+  `simd-backends.md`.
 
 ## Calling convention
 
@@ -350,7 +374,10 @@ Under Microsoft x64, a call of a function no C code reaches by name takes Super-
 (`w64::classify`'s `sc`): an aggregate of 9 to 16 bytes whose last 8 or fewer bytes pass as an integer
 (a slice, a `str`) passes in two integer registers and returns in rax and rdx, as System V passes it.
 Where the program takes such a function's address, the address names a local thunk with C's convention
-(`w64::thunks`, from `native::prepare`), in the object of the code that takes it.
+(`w64::thunks`, from `native::prepare`), in the object of the code that takes it. C reaches a function
+by name when it is `@export`, `@used` or in a named section (`Sym.used`): a call or an address of it
+states the item's attributes on the symbol (`lir::lower::Lower::ref_attrs`), so a build that replays
+the function's unit from the per-TU cache, and has no definition of it, takes C's convention too.
 Check every rule against the C compiler with a C driver (`tests/codegen/native_test.spc`): aggregates
 of each size class, floats in aggregates, i128, vectors, variadic calls, results in memory.
 

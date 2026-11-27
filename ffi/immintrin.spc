@@ -6,6 +6,54 @@
 import std::cpu;
 
 extern "C" "immintrin.h" {
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi1])
+    @unsafe(safe)
+    pub fn _andn_u32(a: u32, b: u32) u32;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi1])
+    @unsafe(safe)
+    pub fn _andn_u64(a: u64, b: u64) u64;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi1])
+    @unsafe(safe)
+    pub fn _bextr_u32(a: u32, start: u32, len: u32) u32;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi1])
+    @unsafe(safe)
+    pub fn _bextr_u64(a: u64, start: u32, len: u32) u64;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi1])
+    @unsafe(safe)
+    pub fn _blsi_u32(a: u32) u32;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi1])
+    @unsafe(safe)
+    pub fn _blsi_u64(a: u64) u64;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi1])
+    @unsafe(safe)
+    pub fn _blsmsk_u32(a: u32) u32;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi1])
+    @unsafe(safe)
+    pub fn _blsmsk_u64(a: u64) u64;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi1])
+    @unsafe(safe)
+    pub fn _blsr_u32(a: u32) u32;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi1])
+    @unsafe(safe)
+    pub fn _blsr_u64(a: u64) u64;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi2])
+    @unsafe(safe)
+    pub fn _bzhi_u32(a: u32, index: u32) u32;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi2])
+    @unsafe(safe)
+    pub fn _bzhi_u64(a: u64, index: u32) u64;
     /// A 128-bit register of integer lanes.
     @arch(x86_64)
     @value(16, 16)
@@ -176,6 +224,9 @@ extern "C" "immintrin.h" {
     @target_feature([cpu::Feature::Avx])
     @unsafe(safe)
     pub fn _mm256_castsi256_si128(a: __m256i) __m128i;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Vpclmulqdq, cpu::Feature::Avx])
+    pub fn _mm256_clmulepi64_epi128(a: __m256i, b: __m256i, imm8: i32) __m256i;
     @arch(x86_64)
     @target_feature([cpu::Feature::Avx512vl, cpu::Feature::Avx512bw])
     pub fn _mm256_cmp_epi16_mask(a: __m256i, b: __m256i, c: i32) u16;
@@ -1102,6 +1153,9 @@ extern "C" "immintrin.h" {
     @unsafe(safe)
     pub fn _mm512_castsi512_si256(a: __m512i) __m256i;
     @arch(x86_64)
+    @target_feature([cpu::Feature::Vpclmulqdq, cpu::Feature::Avx512f])
+    pub fn _mm512_clmulepi64_epi128(a: __m512i, b: __m512i, imm8: i32) __m512i;
+    @arch(x86_64)
     @target_feature([cpu::Feature::Avx512bw])
     pub fn _mm512_cmp_epi16_mask(a: __m512i, b: __m512i, c: i32) u32;
     @arch(x86_64)
@@ -1934,6 +1988,13 @@ extern "C" "immintrin.h" {
     @unsafe(safe)
     pub fn _mm_aesenclast_si128(a: __m128i, b: __m128i) __m128i;
     @arch(x86_64)
+    @target_feature([cpu::Feature::Aesni])
+    @unsafe(safe)
+    pub fn _mm_aesimc_si128(a: __m128i) __m128i;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Aesni])
+    pub fn _mm_aeskeygenassist_si128(a: __m128i, imm8: i32) __m128i;
+    @arch(x86_64)
     @target_feature([cpu::Feature::Sse2])
     @unsafe(safe)
     pub fn _mm_and_pd(a: __m128d, b: __m128d) __m128d;
@@ -2098,6 +2159,22 @@ extern "C" "immintrin.h" {
     @target_feature([cpu::Feature::Sse2])
     @unsafe(safe)
     pub fn _mm_cmpunord_ps(a: __m128, b: __m128) __m128;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Sse42])
+    @unsafe(safe)
+    pub fn _mm_crc32_u16(crc: u32, v: u16) u32;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Sse42])
+    @unsafe(safe)
+    pub fn _mm_crc32_u32(crc: u32, v: u32) u32;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Sse42])
+    @unsafe(safe)
+    pub fn _mm_crc32_u64(crc: u64, v: u64) u64;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Sse42])
+    @unsafe(safe)
+    pub fn _mm_crc32_u8(crc: u32, v: u8) u32;
     @arch(x86_64)
     @target_feature([cpu::Feature::Sse41])
     @unsafe(safe)
@@ -2671,6 +2748,75 @@ extern "C" "immintrin.h" {
     @unsafe(safe)
     pub fn _mm_setzero_si128() __m128i;
     @arch(x86_64)
+    @target_feature([cpu::Feature::Sha])
+    @unsafe(safe)
+    pub fn _mm_sha1msg1_epu32(a: __m128i, b: __m128i) __m128i;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Sha])
+    @unsafe(safe)
+    pub fn _mm_sha1msg2_epu32(a: __m128i, b: __m128i) __m128i;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Sha])
+    @unsafe(safe)
+    pub fn _mm_sha1nexte_epu32(a: __m128i, b: __m128i) __m128i;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Sha])
+    pub fn _mm_sha1rnds4_epu32(a: __m128i, b: __m128i, func: i32) __m128i;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Sha])
+    @unsafe(safe)
+    pub fn _mm_sha256msg1_epu32(a: __m128i, b: __m128i) __m128i;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Sha])
+    @unsafe(safe)
+    pub fn _mm_sha256msg2_epu32(a: __m128i, b: __m128i) __m128i;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Sha])
+    @unsafe(safe)
+    pub fn _mm_sha256rnds2_epu32(a: __m128i, b: __m128i, k: __m128i) __m128i;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Sha512ni])
+    @unsafe(safe)
+    pub fn _mm256_sha512msg1_epi64(a: __m256i, b: __m128i) __m256i;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Sha512ni])
+    @unsafe(safe)
+    pub fn _mm256_sha512msg2_epi64(a: __m256i, b: __m256i) __m256i;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Sha512ni])
+    @unsafe(safe)
+    pub fn _mm256_sha512rnds2_epi64(a: __m256i, b: __m256i, c: __m128i) __m256i;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::AmxTile])
+    pub fn _tile_loadconfig(config: *const void);
+    @arch(x86_64)
+    @target_feature([cpu::Feature::AmxTile])
+    pub fn _tile_storeconfig(config: *mut void);
+    @arch(x86_64)
+    @target_feature([cpu::Feature::AmxTile])
+    pub fn _tile_release();
+    @arch(x86_64)
+    @target_feature([cpu::Feature::AmxTile])
+    pub fn _tile_loadd(dst: i32, base: *const void, stride: usize);
+    @arch(x86_64)
+    @target_feature([cpu::Feature::AmxTile])
+    pub fn _tile_stored(dst: i32, base: *mut void, stride: usize);
+    @arch(x86_64)
+    @target_feature([cpu::Feature::AmxTile])
+    pub fn _tile_zero(tile: i32);
+    @arch(x86_64)
+    @target_feature([cpu::Feature::AmxInt8])
+    pub fn _tile_dpbssd(dst: i32, src0: i32, src1: i32);
+    @arch(x86_64)
+    @target_feature([cpu::Feature::AmxInt8])
+    pub fn _tile_dpbsud(dst: i32, src0: i32, src1: i32);
+    @arch(x86_64)
+    @target_feature([cpu::Feature::AmxInt8])
+    pub fn _tile_dpbusd(dst: i32, src0: i32, src1: i32);
+    @arch(x86_64)
+    @target_feature([cpu::Feature::AmxInt8])
+    pub fn _tile_dpbuud(dst: i32, src0: i32, src1: i32);
+    @arch(x86_64)
     @target_feature([cpu::Feature::Sse2])
     @unsafe(safe)
     pub fn _mm_shuffle_epi32(a: __m128i, b: i32) __m128i;
@@ -2874,4 +3020,24 @@ extern "C" "immintrin.h" {
     @target_feature([cpu::Feature::Sse2])
     @unsafe(safe)
     pub fn _mm_xor_si128(a: __m128i, b: __m128i) __m128i;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi2])
+    @writes(hi, 8)
+    pub fn _mulx_u64(a: u64, b: u64, hi: *mut u64) u64;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi2])
+    @unsafe(safe)
+    pub fn _pdep_u32(a: u32, mask: u32) u32;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi2])
+    @unsafe(safe)
+    pub fn _pdep_u64(a: u64, mask: u64) u64;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi2])
+    @unsafe(safe)
+    pub fn _pext_u32(a: u32, mask: u32) u32;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi2])
+    @unsafe(safe)
+    pub fn _pext_u64(a: u64, mask: u64) u64;
 }

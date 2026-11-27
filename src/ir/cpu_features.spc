@@ -38,7 +38,7 @@ pub(package) struct CpuFeature {
     pub(package) level: u8,
 }
 
-pub(package) const FEATURE_COUNT: usize = 53;
+pub(package) const FEATURE_COUNT: usize = 60;
 pub(package) const F_SIMD128: usize = 0;
 pub(package) const F_RELAXED_SIMD: usize = 1;
 pub(package) const F_SSE2: usize = 2;
@@ -279,6 +279,37 @@ pub(package) const CPU_FEATURES: [CpuFeature; FEATURE_COUNT] = [
     },
     // FEAT_LRCPC: `ldapr`, the acquire load weaker than `ldar` (no order against an earlier release store).
     CpuFeature { name: "rcpc", variant: "Rcpc", arch: 1, implies: V82, c_flag: "+rcpc", level: L_NEED82 },
+    // FEAT_CSSC (optional from Armv8.7-A, mandatory from Armv8.9-A): CTZ, CNT, ABS, SMIN, SMAX, UMIN and
+    // UMAX of general registers.
+    CpuFeature { name: "cssc", variant: "Cssc", arch: 1, implies: V82, c_flag: "+cssc", level: L_NEED82 },
+    // The SHA extensions (SHA-NI): SHA-1 and SHA-256 rounds and message schedules.
+    CpuFeature { name: "sha", variant: "Sha", arch: 0, implies: x(1 << 2), c_flag: "-msha", level: 0 },
+    // FEAT_SHA512 (implies FEAT_SHA256); GCC's and Clang's `+sha3` enables it with FEAT_SHA3.
+    CpuFeature {
+        name: "sha512",
+        variant: "Sha512",
+        arch: 1,
+        implies: CpuFeatureSet { w: [8 | 1 << 10, 0] },
+        c_flag: "+sha3",
+        level: L_NEED82,
+    },
+    // FEAT_PMULL: the 64-bit carry-less product into 128 bits (implies FEAT_AES; `+aes` enables both).
+    CpuFeature {
+        name: "pmull",
+        variant: "Pmull",
+        arch: 1,
+        implies: CpuFeatureSet { w: [8 | 1 << 9, 0] },
+        c_flag: "+aes",
+        level: 0,
+    },
+    // The SHA512 extension (VSHA512RNDS2, VSHA512MSG1, VSHA512MSG2: VEX.256): SHA-512 rounds and message
+    // schedules; GCC's and Clang's `-msha512` implies AVX2.
+    CpuFeature { name: "sha512", variant: "Sha512ni", arch: 0, implies: x(1 << 24), c_flag: "-msha512", level: 0 },
+    // AMX-TILE: the eight tile registers, their configuration, loads and stores (XCR0's tile state; on
+    // Linux a process asks for it, `arch_prctl(ARCH_REQ_XCOMP_PERM)`).
+    CpuFeature { name: "amx-tile", variant: "AmxTile", arch: 0, implies: NONE, c_flag: "-mamx-tile", level: 0 },
+    // AMX-INT8: the byte dot products of tiles into 32-bit sums (`tdpbssd`, `tdpbusd` ..).
+    CpuFeature { name: "amx-int8", variant: "AmxInt8", arch: 0, implies: x(1 << 58), c_flag: "-mamx-int8", level: 0 },
 ];
 
 // Each row's implied set closed under `implies`, the row itself included (Warshall): after step `k`,
@@ -552,8 +583,10 @@ pub(package) fn push_c_flags(s: CpuFeatureSet, target: i32, arch: i32, out: &mut
             continue;
         }
         if !tgt::isa(t[i].arch).ext_flags {
-            out.push_byte(b' ');
-            out.push_str(t[i].c_flag);
+            if !flag_before(s, i) {
+                out.push_byte(b' ');
+                out.push_str(t[i].c_flag);
+            }
             continue;
         }
         extra = extra || !has(b, i);
@@ -580,10 +613,22 @@ pub(package) fn push_c_flags(s: CpuFeatureSet, target: i32, arch: i32, out: &mut
     );
     for i in 0..FEATURE_COUNT {
         let in_arch = mac && has(b, i) || v81 && (t[i].level & L_IN81) != 0;
-        if has(s, i) && tgt::isa(t[i].arch).ext_flags && t[i].c_flag.len() != 0 && !in_arch {
+        if has(s, i) && tgt::isa(t[i].arch).ext_flags && t[i].c_flag.len() != 0 && !in_arch && !flag_before(s, i) {
             out.push_str(t[i].c_flag);
         }
     }
+}
+
+// Whether a feature of `s` before row `i` has row `i`'s C flag (FEAT_PMULL and FEAT_AES share `+aes`): the
+// flag is out once.
+const fn flag_before(s: CpuFeatureSet, i: usize) bool {
+    let t: []CpuFeature = CPU_FEATURES;
+    for j in 0..i {
+        if has(s, j) && t[j].arch == t[i].arch && t[j].c_flag == t[i].c_flag {
+            return true;
+        }
+    }
+    return false;
 }
 
 /// The C `target` attribute argument of a function whose effective features are `s` (closed) in a
@@ -597,7 +642,7 @@ pub(package) fn push_target_attr(s: CpuFeatureSet, build: CpuFeatureSet, target:
     let mut arch: i32 = -1;
     let mut names = String::new();
     for i in 0..FEATURE_COUNT {
-        if !has(s, i) || has(build, i) || t[i].c_flag.len() == 0 {
+        if !has(s, i) || has(build, i) || t[i].c_flag.len() == 0 || flag_before(s, i) {
             continue;
         }
         arch = t[i].arch;

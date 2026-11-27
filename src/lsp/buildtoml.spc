@@ -25,7 +25,7 @@ struct Key {
     pub(package) doc: str<'static>,
 }
 
-const KEYS: [Key; 31] = [
+const KEYS: [Key; 32] = [
     Key { sec: "", name: "bin", doc: "name of the binary this project builds" },
     Key { sec: "", name: "root", doc: "entry source file (default: src/main.spc)" },
     Key { sec: "", name: "out-dir", doc: "directory for build output (default: build)" },
@@ -36,6 +36,7 @@ const KEYS: [Key; 31] = [
     Key { sec: "", name: "jobs", doc: "build workers (default: one per core)" },
     Key { sec: "", name: "const-eval-steps", doc: "compile-time evaluation step budget" },
     Key { sec: "", name: "const-eval-memory", doc: "compile-time evaluation memory budget (B, or NK/NM/NG)" },
+    Key { sec: "", name: "prove-steps", doc: "proof step budget of one function body outside std (default: 4000000)" },
     Key { sec: "", name: "default-profile", doc: "profile used when none is named" },
     Key { sec: "", name: "std_internals", doc: "name std's unstable pub(package) internals (std::platform)" },
     Key { sec: "", name: "target-features", doc: "CPU features to enable, e.g. [\"relaxed-simd\"] (default: none)" },

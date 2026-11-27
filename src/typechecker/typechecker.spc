@@ -36354,21 +36354,23 @@ extend TypeChecker {
                 self.icx.current_fn = id;
                 let g = fnd.is_ghost() as u32;
                 // `@trusted`: the axioms of a spec function or a lemma without a body, and the contracts of an
-                // extern function.
+                // extern function or of a function whose body no proof can follow (a hardware instruction's
+                // meaning), which its callers assume.
                 let trusted = unsafe (*self.cur_ast()).attr_of(id, AttrKind::ATTR_TRUSTED) != null;
                 let (tcs, tce) = unsafe (*self.cur_ast()).contracts_of(id);
                 let ext = fnd.is_extern() && tce > tcs;
+                let held = trusted && !fnd.is_ghost() && fnd.body != NODE_NONE && tce > tcs;
                 // An interface's spec function: each conformance defines it.
                 let ic = unsafe (*self.cur_ast()).container_of(id);
                 let in_iface = ic != NODE_NONE && unsafe (*self.cur_ast()).at_const(ic).kind == NodeKind::NODE_INTERFACE;
-                if trusted != (fnd.is_ghost() && fnd.body == NODE_NONE && !in_iface || ext) {
+                if trusted != (fnd.is_ghost() && fnd.body == NODE_NONE && !in_iface || ext || held) {
                     self.errors.emit_span(
                         dc::TRUSTED_PLACE,
                         unsafe (*self.cur_ast()).at_const(fnd.name).span,
                         format(
                             "{}",
                             if trusted {
-                                "'@trusted' marks a spec function or a lemma without a body, or an extern function with contracts"
+                                "'@trusted' marks a spec function or a lemma without a body, or a function or an extern function with contracts"
                             } else if ext {
                                 "an extern function with contracts must be '@trusted': no proof checks them"
                             } else {
@@ -37261,16 +37263,19 @@ extend TypeChecker {
         self.cur_lo = 0;
     }
 
-    /// Is declaration `decl` of the current module inside the item under check: a body-arena
-    /// node (only the item's own bodies hold those), a module-arena node in the item's own range,
-    /// or a node appended after parsing (a desugar or a rewrite inside the body it extends)?
+    /// Is declaration `decl` of the current module inside the item under check: a body node, in
+    /// the body arena or a pinned body past the declarations (only the item's own bodies hold those),
+    /// a module-arena node in the item's own range, or a node appended after parsing (a desugar or a
+    /// rewrite inside the body it extends)?
     /// Outside `check_one` (the borrow pass, the obligation passes) nothing is own: those
     /// readers lower privately and write no slot.
     const fn decl_is_own(self: &Self, decl: NodeId) bool {
         if self.cur_top == NODE_NONE {
             return false;
         }
-        return Ast::in_body(decl) || decl > self.cur_lo && decl <= self.cur_top || decl >= unsafe (*self.cur_ast()).hir_base;
+        return Ast::in_body(decl) || decl > self.cur_lo && decl <= self.cur_top || unsafe (*self.cur_ast()).past_decls(
+            decl,
+        ) || decl >= unsafe (*self.cur_ast()).hir_base;
     }
 
     /// Is the checked state of node `n` of module `m` visible to the item under check

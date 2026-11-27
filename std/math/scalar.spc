@@ -186,85 +186,85 @@ extend bool as Elem {
 }
 
 extend f32 as Elem {
-    pub fn equal(self: f32, other: f32) bool {
+    pub const fn equal(self: f32, other: f32) bool {
         return self == other;
     }
-    pub fn not_equal(self: f32, other: f32) bool {
+    pub const fn not_equal(self: f32, other: f32) bool {
         return self != other;
     }
 }
 
 extend f32 as Scalar {
-    pub fn add(self: &f32, other: &f32) f32 {
+    pub const fn add(self: &f32, other: &f32) f32 {
         return *self + *other;
     }
-    pub fn sub(self: &f32, other: &f32) f32 {
+    pub const fn sub(self: &f32, other: &f32) f32 {
         return *self - *other;
     }
-    pub fn mul(self: &f32, other: &f32) f32 {
+    pub const fn mul(self: &f32, other: &f32) f32 {
         return *self * *other;
     }
-    pub fn div(self: &f32, other: &f32) f32 {
+    pub const fn div(self: &f32, other: &f32) f32 {
         return *self / *other;
     }
-    pub fn neg(self: &f32) f32 {
+    pub const fn neg(self: &f32) f32 {
         return -*self;
     }
-    pub fn less(self: f32, other: f32) bool {
+    pub const fn less(self: f32, other: f32) bool {
         return self < other;
     }
-    pub fn less_equal(self: f32, other: f32) bool {
+    pub const fn less_equal(self: f32, other: f32) bool {
         return self <= other;
     }
-    pub fn greater(self: f32, other: f32) bool {
+    pub const fn greater(self: f32, other: f32) bool {
         return self > other;
     }
-    pub fn greater_equal(self: f32, other: f32) bool {
+    pub const fn greater_equal(self: f32, other: f32) bool {
         return self >= other;
     }
-    pub fn zero() f32 {
+    pub const fn zero() f32 {
         return 0.0;
     }
-    pub fn one() f32 {
+    pub const fn one() f32 {
         return 1.0;
     }
-    pub fn from_f64(v: f64) f32 {
+    pub const fn from_f64(v: f64) f32 {
         return v as f32;
     }
-    pub fn from_f32(v: f32) f32 {
+    pub const fn from_f32(v: f32) f32 {
         return v;
     }
-    pub fn from_i64(v: i64) f32 {
+    pub const fn from_i64(v: i64) f32 {
         return v as f32;
     }
-    pub fn from_u64(v: u64) f32 {
+    pub const fn from_u64(v: u64) f32 {
         return v as f32;
     }
-    pub fn from_float<const E: usize, const F: usize, const FAM: sf::FloatFamily>(v: sf::Float<E, F, FAM>) f32 {
+    pub const fn from_float<const E: usize, const F: usize, const FAM: sf::FloatFamily>(v: sf::Float<E, F, FAM>) f32 {
         return v.to_f32();
     }
-    pub fn from_uint<const M: usize>(v: si::UInt<M>) f32 {
+    pub const fn from_uint<const M: usize>(v: si::UInt<M>) f32 {
         return v.to_f32();
     }
-    pub fn from_int<const M: usize>(v: si::Int<M>) f32 {
+    pub const fn from_int<const M: usize>(v: si::Int<M>) f32 {
         return v.to_f32();
     }
-    pub fn from_decimal(v: f64, digits: str) f32 {
+    pub const fn from_decimal(v: f64, digits: str) f32 {
         return v as f32;
     }
-    pub fn cast<U: Scalar>(self: f32) U {
+    pub const fn cast<U: Scalar>(self: f32) U {
         return U::from_f32(self);
     }
-    pub fn push_name(s: &mut String) {
+    pub const fn push_name(s: &mut String) {
         s.push_str("");
     }
-    pub fn push_value(s: &mut String, v: f32) {
+    pub const fn push_value(s: &mut String, v: f32) {
         s.push_f64_prec(v, 6);
     }
-    pub fn is_float() bool {
+    pub const fn is_float() bool {
         return true;
     }
-    pub fn is_signed() bool {
+    pub const fn is_signed() bool {
         return true;
     }
 }
@@ -272,88 +272,88 @@ extend f32 as Scalar {
 extend f32 as Float {
     type Int = i32;
     type UInt = u32;
-    pub fn abs(self: f32) f32 {
+    pub const fn abs(self: f32) f32 {
         return self.abs();
     }
-    pub fn floor(self: f32) f32 {
+    pub const fn floor(self: f32) f32 {
         return self.floor();
     }
-    pub fn ceil(self: f32) f32 {
+    pub const fn ceil(self: f32) f32 {
         return self.ceil();
     }
-    pub fn trunc(self: f32) f32 {
+    pub const fn trunc(self: f32) f32 {
         return self.trunc();
     }
-    pub fn round(self: f32) f32 {
+    pub const fn round(self: f32) f32 {
         return self.round();
     }
-    pub fn sqrt(self: f32) f32 {
+    pub const fn sqrt(self: f32) f32 {
         return self.sqrt();
     }
-    pub fn exp(self: f32) f32 {
+    pub const fn exp(self: f32) f32 {
         return self.exp();
     }
-    pub fn exp2(self: f32) f32 {
+    pub const fn exp2(self: f32) f32 {
         return self.exp2();
     }
-    pub fn ln(self: f32) f32 {
+    pub const fn ln(self: f32) f32 {
         return self.ln();
     }
-    pub fn log2(self: f32) f32 {
+    pub const fn log2(self: f32) f32 {
         return self.log2();
     }
-    pub fn pow(self: f32, e: f32) f32 {
+    pub const fn pow(self: f32, e: f32) f32 {
         return self.powf(e);
     }
-    pub fn sin(self: f32) f32 {
+    pub const fn sin(self: f32) f32 {
         return self.sin();
     }
-    pub fn cos(self: f32) f32 {
+    pub const fn cos(self: f32) f32 {
         return self.cos();
     }
-    pub fn tan(self: f32) f32 {
+    pub const fn tan(self: f32) f32 {
         return self.tan();
     }
-    pub fn asin(self: f32) f32 {
+    pub const fn asin(self: f32) f32 {
         return self.asin();
     }
-    pub fn acos(self: f32) f32 {
+    pub const fn acos(self: f32) f32 {
         return self.acos();
     }
-    pub fn atan(self: f32) f32 {
+    pub const fn atan(self: f32) f32 {
         return self.atan();
     }
-    pub fn atan2(self: f32, x: f32) f32 {
+    pub const fn atan2(self: f32, x: f32) f32 {
         return self.atan2(x);
     }
-    pub fn sinh(self: f32) f32 {
+    pub const fn sinh(self: f32) f32 {
         return self.sinh();
     }
-    pub fn cosh(self: f32) f32 {
+    pub const fn cosh(self: f32) f32 {
         return self.cosh();
     }
-    pub fn tanh(self: f32) f32 {
+    pub const fn tanh(self: f32) f32 {
         return self.tanh();
     }
-    pub fn asinh(self: f32) f32 {
+    pub const fn asinh(self: f32) f32 {
         return self.asinh();
     }
-    pub fn acosh(self: f32) f32 {
+    pub const fn acosh(self: f32) f32 {
         return self.acosh();
     }
-    pub fn atanh(self: f32) f32 {
+    pub const fn atanh(self: f32) f32 {
         return self.atanh();
     }
-    pub fn fma(self: f32, a: f32, b: f32) f32 {
+    pub const fn fma(self: f32, a: f32, b: f32) f32 {
         return self.mul_add(a, b);
     }
-    pub fn fmod(self: f32, y: f32) f32 {
+    pub const fn fmod(self: f32, y: f32) f32 {
         return self % y;
     }
-    pub fn fmin(self: f32, other: f32) f32 {
+    pub const fn fmin(self: f32, other: f32) f32 {
         return self.min(other);
     }
-    pub fn fmax(self: f32, other: f32) f32 {
+    pub const fn fmax(self: f32, other: f32) f32 {
         return self.max(other);
     }
     pub fn modf(self: f32) (f32, f32) {
@@ -372,31 +372,31 @@ extend f32 as Float {
     pub fn next_after(self: f32, toward: f32) f32 {
         return unsafe nextafterf(self, toward);
     }
-    pub fn is_nan(self: f32) bool {
+    pub const fn is_nan(self: f32) bool {
         return self.is_nan();
     }
-    pub fn is_inf(self: f32) bool {
+    pub const fn is_inf(self: f32) bool {
         return self.is_infinite();
     }
-    pub fn to_bits(self: f32) u64 {
+    pub const fn to_bits(self: f32) u64 {
         return f32_bits(self);
     }
-    pub fn from_bits(b: u64) f32 {
+    pub const fn from_bits(b: u64) f32 {
         return f32_from_bits(b as u32);
     }
-    pub fn bits_int(self: f32) i32 {
+    pub const fn bits_int(self: f32) i32 {
         return f32_bits(self) as i32;
     }
-    pub fn bits_uint(self: f32) u32 {
+    pub const fn bits_uint(self: f32) u32 {
         return f32_bits(self);
     }
-    pub fn from_bits_int(b: i32) f32 {
+    pub const fn from_bits_int(b: i32) f32 {
         return f32_from_bits(b as u32);
     }
-    pub fn from_bits_uint(b: u32) f32 {
+    pub const fn from_bits_uint(b: u32) f32 {
         return f32_from_bits(b);
     }
-    pub fn ulp_distance(self: f32, other: f32) u64 {
+    pub const fn ulp_distance(self: f32, other: f32) u64 {
         let a = f32_bits(self);
         let b = f32_bits(other);
         if (a ^ b) >> 31 != 0 {
@@ -408,103 +408,103 @@ extend f32 as Float {
             b - a
         };
     }
-    pub fn epsilon() f32 {
+    pub const fn epsilon() f32 {
         return f32_from_bits(0x34000000);
     }
-    pub fn max_finite() f32 {
+    pub const fn max_finite() f32 {
         return f32_from_bits(0x7F7FFFFF);
     }
-    pub fn min_positive() f32 {
+    pub const fn min_positive() f32 {
         return f32_from_bits(0x00800000);
     }
-    pub fn infinity() f32 {
+    pub const fn infinity() f32 {
         return f32_from_bits(0x7F800000);
     }
-    pub fn nan() f32 {
+    pub const fn nan() f32 {
         return f32_from_bits(0x7FC00000);
     }
 }
 
 extend f64 as Elem {
-    pub fn equal(self: f64, other: f64) bool {
+    pub const fn equal(self: f64, other: f64) bool {
         return self == other;
     }
-    pub fn not_equal(self: f64, other: f64) bool {
+    pub const fn not_equal(self: f64, other: f64) bool {
         return self != other;
     }
 }
 
 extend f64 as Scalar {
-    pub fn add(self: &f64, other: &f64) f64 {
+    pub const fn add(self: &f64, other: &f64) f64 {
         return *self + *other;
     }
-    pub fn sub(self: &f64, other: &f64) f64 {
+    pub const fn sub(self: &f64, other: &f64) f64 {
         return *self - *other;
     }
-    pub fn mul(self: &f64, other: &f64) f64 {
+    pub const fn mul(self: &f64, other: &f64) f64 {
         return *self * *other;
     }
-    pub fn div(self: &f64, other: &f64) f64 {
+    pub const fn div(self: &f64, other: &f64) f64 {
         return *self / *other;
     }
-    pub fn neg(self: &f64) f64 {
+    pub const fn neg(self: &f64) f64 {
         return -*self;
     }
-    pub fn less(self: f64, other: f64) bool {
+    pub const fn less(self: f64, other: f64) bool {
         return self < other;
     }
-    pub fn less_equal(self: f64, other: f64) bool {
+    pub const fn less_equal(self: f64, other: f64) bool {
         return self <= other;
     }
-    pub fn greater(self: f64, other: f64) bool {
+    pub const fn greater(self: f64, other: f64) bool {
         return self > other;
     }
-    pub fn greater_equal(self: f64, other: f64) bool {
+    pub const fn greater_equal(self: f64, other: f64) bool {
         return self >= other;
     }
-    pub fn zero() f64 {
+    pub const fn zero() f64 {
         return 0.0;
     }
-    pub fn one() f64 {
+    pub const fn one() f64 {
         return 1.0;
     }
-    pub fn from_f64(v: f64) f64 {
+    pub const fn from_f64(v: f64) f64 {
         return v;
     }
-    pub fn from_f32(v: f32) f64 {
+    pub const fn from_f32(v: f32) f64 {
         return v;
     }
-    pub fn from_i64(v: i64) f64 {
+    pub const fn from_i64(v: i64) f64 {
         return v as f64;
     }
-    pub fn from_u64(v: u64) f64 {
+    pub const fn from_u64(v: u64) f64 {
         return v as f64;
     }
-    pub fn from_float<const E: usize, const F: usize, const FAM: sf::FloatFamily>(v: sf::Float<E, F, FAM>) f64 {
+    pub const fn from_float<const E: usize, const F: usize, const FAM: sf::FloatFamily>(v: sf::Float<E, F, FAM>) f64 {
         return v.to_f64();
     }
-    pub fn from_uint<const M: usize>(v: si::UInt<M>) f64 {
+    pub const fn from_uint<const M: usize>(v: si::UInt<M>) f64 {
         return v.to_f64();
     }
-    pub fn from_int<const M: usize>(v: si::Int<M>) f64 {
+    pub const fn from_int<const M: usize>(v: si::Int<M>) f64 {
         return v.to_f64();
     }
-    pub fn from_decimal(v: f64, digits: str) f64 {
+    pub const fn from_decimal(v: f64, digits: str) f64 {
         return v;
     }
-    pub fn cast<U: Scalar>(self: f64) U {
+    pub const fn cast<U: Scalar>(self: f64) U {
         return U::from_f64(self);
     }
-    pub fn push_name(s: &mut String) {
+    pub const fn push_name(s: &mut String) {
         s.push_str("d");
     }
-    pub fn push_value(s: &mut String, v: f64) {
+    pub const fn push_value(s: &mut String, v: f64) {
         s.push_f64_prec(v, 6);
     }
-    pub fn is_float() bool {
+    pub const fn is_float() bool {
         return true;
     }
-    pub fn is_signed() bool {
+    pub const fn is_signed() bool {
         return true;
     }
 }
@@ -512,88 +512,88 @@ extend f64 as Scalar {
 extend f64 as Float {
     type Int = i64;
     type UInt = u64;
-    pub fn abs(self: f64) f64 {
+    pub const fn abs(self: f64) f64 {
         return self.abs();
     }
-    pub fn floor(self: f64) f64 {
+    pub const fn floor(self: f64) f64 {
         return self.floor();
     }
-    pub fn ceil(self: f64) f64 {
+    pub const fn ceil(self: f64) f64 {
         return self.ceil();
     }
-    pub fn trunc(self: f64) f64 {
+    pub const fn trunc(self: f64) f64 {
         return self.trunc();
     }
-    pub fn round(self: f64) f64 {
+    pub const fn round(self: f64) f64 {
         return self.round();
     }
-    pub fn sqrt(self: f64) f64 {
+    pub const fn sqrt(self: f64) f64 {
         return self.sqrt();
     }
-    pub fn exp(self: f64) f64 {
+    pub const fn exp(self: f64) f64 {
         return self.exp();
     }
-    pub fn exp2(self: f64) f64 {
+    pub const fn exp2(self: f64) f64 {
         return self.exp2();
     }
-    pub fn ln(self: f64) f64 {
+    pub const fn ln(self: f64) f64 {
         return self.ln();
     }
-    pub fn log2(self: f64) f64 {
+    pub const fn log2(self: f64) f64 {
         return self.log2();
     }
-    pub fn pow(self: f64, e: f64) f64 {
+    pub const fn pow(self: f64, e: f64) f64 {
         return self.powf(e);
     }
-    pub fn sin(self: f64) f64 {
+    pub const fn sin(self: f64) f64 {
         return self.sin();
     }
-    pub fn cos(self: f64) f64 {
+    pub const fn cos(self: f64) f64 {
         return self.cos();
     }
-    pub fn tan(self: f64) f64 {
+    pub const fn tan(self: f64) f64 {
         return self.tan();
     }
-    pub fn asin(self: f64) f64 {
+    pub const fn asin(self: f64) f64 {
         return self.asin();
     }
-    pub fn acos(self: f64) f64 {
+    pub const fn acos(self: f64) f64 {
         return self.acos();
     }
-    pub fn atan(self: f64) f64 {
+    pub const fn atan(self: f64) f64 {
         return self.atan();
     }
-    pub fn atan2(self: f64, x: f64) f64 {
+    pub const fn atan2(self: f64, x: f64) f64 {
         return self.atan2(x);
     }
-    pub fn sinh(self: f64) f64 {
+    pub const fn sinh(self: f64) f64 {
         return self.sinh();
     }
-    pub fn cosh(self: f64) f64 {
+    pub const fn cosh(self: f64) f64 {
         return self.cosh();
     }
-    pub fn tanh(self: f64) f64 {
+    pub const fn tanh(self: f64) f64 {
         return self.tanh();
     }
-    pub fn asinh(self: f64) f64 {
+    pub const fn asinh(self: f64) f64 {
         return self.asinh();
     }
-    pub fn acosh(self: f64) f64 {
+    pub const fn acosh(self: f64) f64 {
         return self.acosh();
     }
-    pub fn atanh(self: f64) f64 {
+    pub const fn atanh(self: f64) f64 {
         return self.atanh();
     }
-    pub fn fma(self: f64, a: f64, b: f64) f64 {
+    pub const fn fma(self: f64, a: f64, b: f64) f64 {
         return self.mul_add(a, b);
     }
-    pub fn fmod(self: f64, y: f64) f64 {
+    pub const fn fmod(self: f64, y: f64) f64 {
         return self % y;
     }
-    pub fn fmin(self: f64, other: f64) f64 {
+    pub const fn fmin(self: f64, other: f64) f64 {
         return self.min(other);
     }
-    pub fn fmax(self: f64, other: f64) f64 {
+    pub const fn fmax(self: f64, other: f64) f64 {
         return self.max(other);
     }
     pub fn modf(self: f64) (f64, f64) {
@@ -612,31 +612,31 @@ extend f64 as Float {
     pub fn next_after(self: f64, toward: f64) f64 {
         return unsafe nextafter(self, toward);
     }
-    pub fn is_nan(self: f64) bool {
+    pub const fn is_nan(self: f64) bool {
         return self.is_nan();
     }
-    pub fn is_inf(self: f64) bool {
+    pub const fn is_inf(self: f64) bool {
         return self.is_infinite();
     }
-    pub fn to_bits(self: f64) u64 {
+    pub const fn to_bits(self: f64) u64 {
         return f64_bits(self);
     }
-    pub fn from_bits(b: u64) f64 {
+    pub const fn from_bits(b: u64) f64 {
         return f64_from_bits(b);
     }
-    pub fn bits_int(self: f64) i64 {
+    pub const fn bits_int(self: f64) i64 {
         return f64_bits(self) as i64;
     }
-    pub fn bits_uint(self: f64) u64 {
+    pub const fn bits_uint(self: f64) u64 {
         return f64_bits(self);
     }
-    pub fn from_bits_int(b: i64) f64 {
+    pub const fn from_bits_int(b: i64) f64 {
         return f64_from_bits(b as u64);
     }
-    pub fn from_bits_uint(b: u64) f64 {
+    pub const fn from_bits_uint(b: u64) f64 {
         return f64_from_bits(b);
     }
-    pub fn ulp_distance(self: f64, other: f64) u64 {
+    pub const fn ulp_distance(self: f64, other: f64) u64 {
         let a = f64_bits(self);
         let b = f64_bits(other);
         if (a ^ b) >> 63 != 0 {
@@ -648,79 +648,79 @@ extend f64 as Float {
             b - a
         };
     }
-    pub fn epsilon() f64 {
+    pub const fn epsilon() f64 {
         return f64_from_bits(0x3CB0000000000000);
     }
-    pub fn max_finite() f64 {
+    pub const fn max_finite() f64 {
         return f64_from_bits(0x7FEFFFFFFFFFFFFF);
     }
-    pub fn min_positive() f64 {
+    pub const fn min_positive() f64 {
         return f64_from_bits(0x0010000000000000);
     }
-    pub fn infinity() f64 {
+    pub const fn infinity() f64 {
         return f64_from_bits(0x7FF0000000000000);
     }
-    pub fn nan() f64 {
+    pub const fn nan() f64 {
         return f64_from_bits(0x7FF8000000000000);
     }
 }
 
 extend i8 as Elem {
-    pub fn equal(self: i8, other: i8) bool {
+    pub const fn equal(self: i8, other: i8) bool {
         return self == other;
     }
-    pub fn not_equal(self: i8, other: i8) bool {
+    pub const fn not_equal(self: i8, other: i8) bool {
         return self != other;
     }
 }
 
 extend i8 as Scalar {
-    pub fn add(self: &i8, other: &i8) i8 {
+    pub const fn add(self: &i8, other: &i8) i8 {
         return ((*self) as i32 + (*other) as i32) as i8;
     }
-    pub fn sub(self: &i8, other: &i8) i8 {
+    pub const fn sub(self: &i8, other: &i8) i8 {
         return ((*self) as i32 - (*other) as i32) as i8;
     }
-    pub fn mul(self: &i8, other: &i8) i8 {
+    pub const fn mul(self: &i8, other: &i8) i8 {
         return ((*self) as i32 * (*other) as i32) as i8;
     }
-    pub fn div(self: &i8, other: &i8) i8 {
+    pub const fn div(self: &i8, other: &i8) i8 {
         return ((*self) as i32 / (*other) as i32) as i8;
     }
-    pub fn neg(self: &i8) i8 {
+    pub const fn neg(self: &i8) i8 {
         return (-((*self) as i32)) as i8;
     }
-    pub fn less(self: i8, other: i8) bool {
+    pub const fn less(self: i8, other: i8) bool {
         return self < other;
     }
-    pub fn less_equal(self: i8, other: i8) bool {
+    pub const fn less_equal(self: i8, other: i8) bool {
         return self <= other;
     }
-    pub fn greater(self: i8, other: i8) bool {
+    pub const fn greater(self: i8, other: i8) bool {
         return self > other;
     }
-    pub fn greater_equal(self: i8, other: i8) bool {
+    pub const fn greater_equal(self: i8, other: i8) bool {
         return self >= other;
     }
-    pub fn zero() i8 {
+    pub const fn zero() i8 {
         return 0;
     }
-    pub fn one() i8 {
+    pub const fn one() i8 {
         return 1;
     }
-    pub fn from_f64(v: f64) i8 {
+    pub const fn from_f64(v: f64) i8 {
         return v as i8;
     }
-    pub fn from_f32(v: f32) i8 {
+    pub const fn from_f32(v: f32) i8 {
         return v as i8;
     }
-    pub fn from_i64(v: i64) i8 {
+    pub const fn from_i64(v: i64) i8 {
         return v as i8;
     }
-    pub fn from_u64(v: u64) i8 {
+    pub const fn from_u64(v: u64) i8 {
         return v as i8;
     }
-    pub fn from_float<const E: usize, const F: usize, const FAM: sf::FloatFamily>(v: sf::Float<E, F, FAM>) i8 {
+    pub const fn from_float<const E: usize, const F: usize, const FAM: sf::FloatFamily>(v: sf::Float<E, F, FAM>) i8 {
         let mut r = si::Int::<64>::zero();
         v.to_int(&mut r);
         let x = r.to_i64();
@@ -732,136 +732,136 @@ extend i8 as Scalar {
         }
         return x as i8;
     }
-    pub fn from_uint<const M: usize>(v: si::UInt<M>) i8 {
+    pub const fn from_uint<const M: usize>(v: si::UInt<M>) i8 {
         return v.to_u64() as i8;
     }
-    pub fn from_int<const M: usize>(v: si::Int<M>) i8 {
+    pub const fn from_int<const M: usize>(v: si::Int<M>) i8 {
         return v.to_i64() as i8;
     }
-    pub fn from_decimal(v: f64, digits: str) i8 {
+    pub const fn from_decimal(v: f64, digits: str) i8 {
         return v as i8;
     }
-    pub fn cast<U: Scalar>(self: i8) U {
+    pub const fn cast<U: Scalar>(self: i8) U {
         return U::from_i64(self);
     }
-    pub fn push_name(s: &mut String) {
+    pub const fn push_name(s: &mut String) {
         s.push_str("i8");
     }
-    pub fn push_value(s: &mut String, v: i8) {
+    pub const fn push_value(s: &mut String, v: i8) {
         s.push_i64(v as i32);
     }
-    pub fn is_float() bool {
+    pub const fn is_float() bool {
         return false;
     }
-    pub fn is_signed() bool {
+    pub const fn is_signed() bool {
         return true;
     }
 }
 
 extend i8 as Int {
-    pub fn rem(self: &i8, other: &i8) i8 {
+    pub const fn rem(self: &i8, other: &i8) i8 {
         return ((*self) as i32 % (*other) as i32) as i8;
     }
-    pub fn bit_and(self: &i8, other: &i8) i8 {
+    pub const fn bit_and(self: &i8, other: &i8) i8 {
         return *self & *other;
     }
-    pub fn bit_or(self: &i8, other: &i8) i8 {
+    pub const fn bit_or(self: &i8, other: &i8) i8 {
         return *self | *other;
     }
-    pub fn bit_xor(self: &i8, other: &i8) i8 {
+    pub const fn bit_xor(self: &i8, other: &i8) i8 {
         return *self ^ *other;
     }
-    pub fn bit_not(self: &i8) i8 {
+    pub const fn bit_not(self: &i8) i8 {
         return ~*self;
     }
-    pub fn shl(self: &i8, n: i8) i8 {
+    pub const fn shl(self: &i8, n: i8) i8 {
         return ((*self) as i32 << n as i32) as i8;
     }
-    pub fn shr(self: &i8, n: i8) i8 {
+    pub const fn shr(self: &i8, n: i8) i8 {
         return ((*self) as i32 >> n as i32) as i8;
     }
-    pub fn count_ones(self: i8) i32 {
+    pub const fn count_ones(self: i8) i32 {
         return self.count_ones() as i32;
     }
-    pub fn leading_zeros(self: i8) i32 {
+    pub const fn leading_zeros(self: i8) i32 {
         return self.leading_zeros() as i32;
     }
-    pub fn trailing_zeros(self: i8) i32 {
+    pub const fn trailing_zeros(self: i8) i32 {
         return self.trailing_zeros() as i32;
     }
-    pub fn bits() i32 {
+    pub const fn bits() i32 {
         return 8;
     }
-    pub fn min_value() i8 {
+    pub const fn min_value() i8 {
         return i8::MIN;
     }
-    pub fn max_value() i8 {
+    pub const fn max_value() i8 {
         return i8::MAX;
     }
-    pub fn to_i64(self: i8) i64 {
+    pub const fn to_i64(self: i8) i64 {
         return self;
     }
-    pub fn to_u64(self: i8) u64 {
+    pub const fn to_u64(self: i8) u64 {
         return self as u64;
     }
 }
 
 extend i16 as Elem {
-    pub fn equal(self: i16, other: i16) bool {
+    pub const fn equal(self: i16, other: i16) bool {
         return self == other;
     }
-    pub fn not_equal(self: i16, other: i16) bool {
+    pub const fn not_equal(self: i16, other: i16) bool {
         return self != other;
     }
 }
 
 extend i16 as Scalar {
-    pub fn add(self: &i16, other: &i16) i16 {
+    pub const fn add(self: &i16, other: &i16) i16 {
         return ((*self) as i32 + (*other) as i32) as i16;
     }
-    pub fn sub(self: &i16, other: &i16) i16 {
+    pub const fn sub(self: &i16, other: &i16) i16 {
         return ((*self) as i32 - (*other) as i32) as i16;
     }
-    pub fn mul(self: &i16, other: &i16) i16 {
+    pub const fn mul(self: &i16, other: &i16) i16 {
         return ((*self) as i32 * (*other) as i32) as i16;
     }
-    pub fn div(self: &i16, other: &i16) i16 {
+    pub const fn div(self: &i16, other: &i16) i16 {
         return ((*self) as i32 / (*other) as i32) as i16;
     }
-    pub fn neg(self: &i16) i16 {
+    pub const fn neg(self: &i16) i16 {
         return (-((*self) as i32)) as i16;
     }
-    pub fn less(self: i16, other: i16) bool {
+    pub const fn less(self: i16, other: i16) bool {
         return self < other;
     }
-    pub fn less_equal(self: i16, other: i16) bool {
+    pub const fn less_equal(self: i16, other: i16) bool {
         return self <= other;
     }
-    pub fn greater(self: i16, other: i16) bool {
+    pub const fn greater(self: i16, other: i16) bool {
         return self > other;
     }
-    pub fn greater_equal(self: i16, other: i16) bool {
+    pub const fn greater_equal(self: i16, other: i16) bool {
         return self >= other;
     }
-    pub fn zero() i16 {
+    pub const fn zero() i16 {
         return 0;
     }
-    pub fn one() i16 {
+    pub const fn one() i16 {
         return 1;
     }
-    pub fn from_f64(v: f64) i16 {
+    pub const fn from_f64(v: f64) i16 {
         return v as i16;
     }
-    pub fn from_f32(v: f32) i16 {
+    pub const fn from_f32(v: f32) i16 {
         return v as i16;
     }
-    pub fn from_i64(v: i64) i16 {
+    pub const fn from_i64(v: i64) i16 {
         return v as i16;
     }
-    pub fn from_u64(v: u64) i16 {
+    pub const fn from_u64(v: u64) i16 {
         return v as i16;
     }
-    pub fn from_float<const E: usize, const F: usize, const FAM: sf::FloatFamily>(v: sf::Float<E, F, FAM>) i16 {
+    pub const fn from_float<const E: usize, const F: usize, const FAM: sf::FloatFamily>(v: sf::Float<E, F, FAM>) i16 {
         let mut r = si::Int::<64>::zero();
         v.to_int(&mut r);
         let x = r.to_i64();
@@ -873,136 +873,136 @@ extend i16 as Scalar {
         }
         return x as i16;
     }
-    pub fn from_uint<const M: usize>(v: si::UInt<M>) i16 {
+    pub const fn from_uint<const M: usize>(v: si::UInt<M>) i16 {
         return v.to_u64() as i16;
     }
-    pub fn from_int<const M: usize>(v: si::Int<M>) i16 {
+    pub const fn from_int<const M: usize>(v: si::Int<M>) i16 {
         return v.to_i64() as i16;
     }
-    pub fn from_decimal(v: f64, digits: str) i16 {
+    pub const fn from_decimal(v: f64, digits: str) i16 {
         return v as i16;
     }
-    pub fn cast<U: Scalar>(self: i16) U {
+    pub const fn cast<U: Scalar>(self: i16) U {
         return U::from_i64(self);
     }
-    pub fn push_name(s: &mut String) {
+    pub const fn push_name(s: &mut String) {
         s.push_str("i16");
     }
-    pub fn push_value(s: &mut String, v: i16) {
+    pub const fn push_value(s: &mut String, v: i16) {
         s.push_i64(v as i32);
     }
-    pub fn is_float() bool {
+    pub const fn is_float() bool {
         return false;
     }
-    pub fn is_signed() bool {
+    pub const fn is_signed() bool {
         return true;
     }
 }
 
 extend i16 as Int {
-    pub fn rem(self: &i16, other: &i16) i16 {
+    pub const fn rem(self: &i16, other: &i16) i16 {
         return ((*self) as i32 % (*other) as i32) as i16;
     }
-    pub fn bit_and(self: &i16, other: &i16) i16 {
+    pub const fn bit_and(self: &i16, other: &i16) i16 {
         return *self & *other;
     }
-    pub fn bit_or(self: &i16, other: &i16) i16 {
+    pub const fn bit_or(self: &i16, other: &i16) i16 {
         return *self | *other;
     }
-    pub fn bit_xor(self: &i16, other: &i16) i16 {
+    pub const fn bit_xor(self: &i16, other: &i16) i16 {
         return *self ^ *other;
     }
-    pub fn bit_not(self: &i16) i16 {
+    pub const fn bit_not(self: &i16) i16 {
         return ~*self;
     }
-    pub fn shl(self: &i16, n: i16) i16 {
+    pub const fn shl(self: &i16, n: i16) i16 {
         return ((*self) as i32 << n as i32) as i16;
     }
-    pub fn shr(self: &i16, n: i16) i16 {
+    pub const fn shr(self: &i16, n: i16) i16 {
         return ((*self) as i32 >> n as i32) as i16;
     }
-    pub fn count_ones(self: i16) i32 {
+    pub const fn count_ones(self: i16) i32 {
         return self.count_ones() as i32;
     }
-    pub fn leading_zeros(self: i16) i32 {
+    pub const fn leading_zeros(self: i16) i32 {
         return self.leading_zeros() as i32;
     }
-    pub fn trailing_zeros(self: i16) i32 {
+    pub const fn trailing_zeros(self: i16) i32 {
         return self.trailing_zeros() as i32;
     }
-    pub fn bits() i32 {
+    pub const fn bits() i32 {
         return 16;
     }
-    pub fn min_value() i16 {
+    pub const fn min_value() i16 {
         return i16::MIN;
     }
-    pub fn max_value() i16 {
+    pub const fn max_value() i16 {
         return i16::MAX;
     }
-    pub fn to_i64(self: i16) i64 {
+    pub const fn to_i64(self: i16) i64 {
         return self;
     }
-    pub fn to_u64(self: i16) u64 {
+    pub const fn to_u64(self: i16) u64 {
         return self as u64;
     }
 }
 
 extend i32 as Elem {
-    pub fn equal(self: i32, other: i32) bool {
+    pub const fn equal(self: i32, other: i32) bool {
         return self == other;
     }
-    pub fn not_equal(self: i32, other: i32) bool {
+    pub const fn not_equal(self: i32, other: i32) bool {
         return self != other;
     }
 }
 
 extend i32 as Scalar {
-    pub fn add(self: &i32, other: &i32) i32 {
+    pub const fn add(self: &i32, other: &i32) i32 {
         return *self + *other;
     }
-    pub fn sub(self: &i32, other: &i32) i32 {
+    pub const fn sub(self: &i32, other: &i32) i32 {
         return *self - *other;
     }
-    pub fn mul(self: &i32, other: &i32) i32 {
+    pub const fn mul(self: &i32, other: &i32) i32 {
         return *self * *other;
     }
-    pub fn div(self: &i32, other: &i32) i32 {
+    pub const fn div(self: &i32, other: &i32) i32 {
         return *self / *other;
     }
-    pub fn neg(self: &i32) i32 {
+    pub const fn neg(self: &i32) i32 {
         return -*self;
     }
-    pub fn less(self: i32, other: i32) bool {
+    pub const fn less(self: i32, other: i32) bool {
         return self < other;
     }
-    pub fn less_equal(self: i32, other: i32) bool {
+    pub const fn less_equal(self: i32, other: i32) bool {
         return self <= other;
     }
-    pub fn greater(self: i32, other: i32) bool {
+    pub const fn greater(self: i32, other: i32) bool {
         return self > other;
     }
-    pub fn greater_equal(self: i32, other: i32) bool {
+    pub const fn greater_equal(self: i32, other: i32) bool {
         return self >= other;
     }
-    pub fn zero() i32 {
+    pub const fn zero() i32 {
         return 0;
     }
-    pub fn one() i32 {
+    pub const fn one() i32 {
         return 1;
     }
-    pub fn from_f64(v: f64) i32 {
+    pub const fn from_f64(v: f64) i32 {
         return v as i32;
     }
-    pub fn from_f32(v: f32) i32 {
+    pub const fn from_f32(v: f32) i32 {
         return v as i32;
     }
-    pub fn from_i64(v: i64) i32 {
+    pub const fn from_i64(v: i64) i32 {
         return v as i32;
     }
-    pub fn from_u64(v: u64) i32 {
+    pub const fn from_u64(v: u64) i32 {
         return v as i32;
     }
-    pub fn from_float<const E: usize, const F: usize, const FAM: sf::FloatFamily>(v: sf::Float<E, F, FAM>) i32 {
+    pub const fn from_float<const E: usize, const F: usize, const FAM: sf::FloatFamily>(v: sf::Float<E, F, FAM>) i32 {
         let mut r = si::Int::<64>::zero();
         v.to_int(&mut r);
         let x = r.to_i64();
@@ -1014,271 +1014,271 @@ extend i32 as Scalar {
         }
         return x as i32;
     }
-    pub fn from_uint<const M: usize>(v: si::UInt<M>) i32 {
+    pub const fn from_uint<const M: usize>(v: si::UInt<M>) i32 {
         return v.to_u64() as i32;
     }
-    pub fn from_int<const M: usize>(v: si::Int<M>) i32 {
+    pub const fn from_int<const M: usize>(v: si::Int<M>) i32 {
         return v.to_i64() as i32;
     }
-    pub fn from_decimal(v: f64, digits: str) i32 {
+    pub const fn from_decimal(v: f64, digits: str) i32 {
         return v as i32;
     }
-    pub fn cast<U: Scalar>(self: i32) U {
+    pub const fn cast<U: Scalar>(self: i32) U {
         return U::from_i64(self);
     }
-    pub fn push_name(s: &mut String) {
+    pub const fn push_name(s: &mut String) {
         s.push_str("i");
     }
-    pub fn push_value(s: &mut String, v: i32) {
+    pub const fn push_value(s: &mut String, v: i32) {
         s.push_i64(v);
     }
-    pub fn is_float() bool {
+    pub const fn is_float() bool {
         return false;
     }
-    pub fn is_signed() bool {
+    pub const fn is_signed() bool {
         return true;
     }
 }
 
 extend i32 as Int {
-    pub fn rem(self: &i32, other: &i32) i32 {
+    pub const fn rem(self: &i32, other: &i32) i32 {
         return *self % *other;
     }
-    pub fn bit_and(self: &i32, other: &i32) i32 {
+    pub const fn bit_and(self: &i32, other: &i32) i32 {
         return *self & *other;
     }
-    pub fn bit_or(self: &i32, other: &i32) i32 {
+    pub const fn bit_or(self: &i32, other: &i32) i32 {
         return *self | *other;
     }
-    pub fn bit_xor(self: &i32, other: &i32) i32 {
+    pub const fn bit_xor(self: &i32, other: &i32) i32 {
         return *self ^ *other;
     }
-    pub fn bit_not(self: &i32) i32 {
+    pub const fn bit_not(self: &i32) i32 {
         return ~*self;
     }
-    pub fn shl(self: &i32, n: i32) i32 {
+    pub const fn shl(self: &i32, n: i32) i32 {
         return *self << n;
     }
-    pub fn shr(self: &i32, n: i32) i32 {
+    pub const fn shr(self: &i32, n: i32) i32 {
         return *self >> n;
     }
-    pub fn count_ones(self: i32) i32 {
+    pub const fn count_ones(self: i32) i32 {
         return self.count_ones() as i32;
     }
-    pub fn leading_zeros(self: i32) i32 {
+    pub const fn leading_zeros(self: i32) i32 {
         return self.leading_zeros() as i32;
     }
-    pub fn trailing_zeros(self: i32) i32 {
+    pub const fn trailing_zeros(self: i32) i32 {
         return self.trailing_zeros() as i32;
     }
-    pub fn bits() i32 {
+    pub const fn bits() i32 {
         return 32;
     }
-    pub fn min_value() i32 {
+    pub const fn min_value() i32 {
         return i32::MIN;
     }
-    pub fn max_value() i32 {
+    pub const fn max_value() i32 {
         return i32::MAX;
     }
-    pub fn to_i64(self: i32) i64 {
+    pub const fn to_i64(self: i32) i64 {
         return self;
     }
-    pub fn to_u64(self: i32) u64 {
+    pub const fn to_u64(self: i32) u64 {
         return self as u64;
     }
 }
 
 extend i64 as Elem {
-    pub fn equal(self: i64, other: i64) bool {
+    pub const fn equal(self: i64, other: i64) bool {
         return self == other;
     }
-    pub fn not_equal(self: i64, other: i64) bool {
+    pub const fn not_equal(self: i64, other: i64) bool {
         return self != other;
     }
 }
 
 extend i64 as Scalar {
-    pub fn add(self: &i64, other: &i64) i64 {
+    pub const fn add(self: &i64, other: &i64) i64 {
         return *self + *other;
     }
-    pub fn sub(self: &i64, other: &i64) i64 {
+    pub const fn sub(self: &i64, other: &i64) i64 {
         return *self - *other;
     }
-    pub fn mul(self: &i64, other: &i64) i64 {
+    pub const fn mul(self: &i64, other: &i64) i64 {
         return *self * *other;
     }
-    pub fn div(self: &i64, other: &i64) i64 {
+    pub const fn div(self: &i64, other: &i64) i64 {
         return *self / *other;
     }
-    pub fn neg(self: &i64) i64 {
+    pub const fn neg(self: &i64) i64 {
         return -*self;
     }
-    pub fn less(self: i64, other: i64) bool {
+    pub const fn less(self: i64, other: i64) bool {
         return self < other;
     }
-    pub fn less_equal(self: i64, other: i64) bool {
+    pub const fn less_equal(self: i64, other: i64) bool {
         return self <= other;
     }
-    pub fn greater(self: i64, other: i64) bool {
+    pub const fn greater(self: i64, other: i64) bool {
         return self > other;
     }
-    pub fn greater_equal(self: i64, other: i64) bool {
+    pub const fn greater_equal(self: i64, other: i64) bool {
         return self >= other;
     }
-    pub fn zero() i64 {
+    pub const fn zero() i64 {
         return 0;
     }
-    pub fn one() i64 {
+    pub const fn one() i64 {
         return 1;
     }
-    pub fn from_f64(v: f64) i64 {
+    pub const fn from_f64(v: f64) i64 {
         return v as i64;
     }
-    pub fn from_f32(v: f32) i64 {
+    pub const fn from_f32(v: f32) i64 {
         return v as i64;
     }
-    pub fn from_i64(v: i64) i64 {
+    pub const fn from_i64(v: i64) i64 {
         return v;
     }
-    pub fn from_u64(v: u64) i64 {
+    pub const fn from_u64(v: u64) i64 {
         return v as i64;
     }
-    pub fn from_float<const E: usize, const F: usize, const FAM: sf::FloatFamily>(v: sf::Float<E, F, FAM>) i64 {
+    pub const fn from_float<const E: usize, const F: usize, const FAM: sf::FloatFamily>(v: sf::Float<E, F, FAM>) i64 {
         let mut r = si::Int::<64>::zero();
         v.to_int(&mut r);
         let x = r.to_i64();
         return x;
     }
-    pub fn from_uint<const M: usize>(v: si::UInt<M>) i64 {
+    pub const fn from_uint<const M: usize>(v: si::UInt<M>) i64 {
         return v.to_u64() as i64;
     }
-    pub fn from_int<const M: usize>(v: si::Int<M>) i64 {
+    pub const fn from_int<const M: usize>(v: si::Int<M>) i64 {
         return v.to_i64();
     }
-    pub fn from_decimal(v: f64, digits: str) i64 {
+    pub const fn from_decimal(v: f64, digits: str) i64 {
         return v as i64;
     }
-    pub fn cast<U: Scalar>(self: i64) U {
+    pub const fn cast<U: Scalar>(self: i64) U {
         return U::from_i64(self);
     }
-    pub fn push_name(s: &mut String) {
+    pub const fn push_name(s: &mut String) {
         s.push_str("i64");
     }
-    pub fn push_value(s: &mut String, v: i64) {
+    pub const fn push_value(s: &mut String, v: i64) {
         s.push_i64(v as i32);
     }
-    pub fn is_float() bool {
+    pub const fn is_float() bool {
         return false;
     }
-    pub fn is_signed() bool {
+    pub const fn is_signed() bool {
         return true;
     }
 }
 
 extend i64 as Int {
-    pub fn rem(self: &i64, other: &i64) i64 {
+    pub const fn rem(self: &i64, other: &i64) i64 {
         return *self % *other;
     }
-    pub fn bit_and(self: &i64, other: &i64) i64 {
+    pub const fn bit_and(self: &i64, other: &i64) i64 {
         return *self & *other;
     }
-    pub fn bit_or(self: &i64, other: &i64) i64 {
+    pub const fn bit_or(self: &i64, other: &i64) i64 {
         return *self | *other;
     }
-    pub fn bit_xor(self: &i64, other: &i64) i64 {
+    pub const fn bit_xor(self: &i64, other: &i64) i64 {
         return *self ^ *other;
     }
-    pub fn bit_not(self: &i64) i64 {
+    pub const fn bit_not(self: &i64) i64 {
         return ~*self;
     }
-    pub fn shl(self: &i64, n: i64) i64 {
+    pub const fn shl(self: &i64, n: i64) i64 {
         return *self << n;
     }
-    pub fn shr(self: &i64, n: i64) i64 {
+    pub const fn shr(self: &i64, n: i64) i64 {
         return *self >> n;
     }
-    pub fn count_ones(self: i64) i32 {
+    pub const fn count_ones(self: i64) i32 {
         return self.count_ones() as i32;
     }
-    pub fn leading_zeros(self: i64) i32 {
+    pub const fn leading_zeros(self: i64) i32 {
         return self.leading_zeros() as i32;
     }
-    pub fn trailing_zeros(self: i64) i32 {
+    pub const fn trailing_zeros(self: i64) i32 {
         return self.trailing_zeros() as i32;
     }
-    pub fn bits() i32 {
+    pub const fn bits() i32 {
         return 64;
     }
-    pub fn min_value() i64 {
+    pub const fn min_value() i64 {
         return i64::MIN;
     }
-    pub fn max_value() i64 {
+    pub const fn max_value() i64 {
         return i64::MAX;
     }
-    pub fn to_i64(self: i64) i64 {
+    pub const fn to_i64(self: i64) i64 {
         return self;
     }
-    pub fn to_u64(self: i64) u64 {
+    pub const fn to_u64(self: i64) u64 {
         return self as u64;
     }
 }
 
 extend u8 as Elem {
-    pub fn equal(self: u8, other: u8) bool {
+    pub const fn equal(self: u8, other: u8) bool {
         return self == other;
     }
-    pub fn not_equal(self: u8, other: u8) bool {
+    pub const fn not_equal(self: u8, other: u8) bool {
         return self != other;
     }
 }
 
 extend u8 as Scalar {
-    pub fn add(self: &u8, other: &u8) u8 {
+    pub const fn add(self: &u8, other: &u8) u8 {
         return ((*self) as u32).wrapping_add(*other) as u8;
     }
-    pub fn sub(self: &u8, other: &u8) u8 {
+    pub const fn sub(self: &u8, other: &u8) u8 {
         return ((*self) as u32).wrapping_sub(*other) as u8;
     }
-    pub fn mul(self: &u8, other: &u8) u8 {
+    pub const fn mul(self: &u8, other: &u8) u8 {
         return ((*self) as u32).wrapping_mul(*other) as u8;
     }
-    pub fn div(self: &u8, other: &u8) u8 {
+    pub const fn div(self: &u8, other: &u8) u8 {
         return *self / *other;
     }
-    pub fn neg(self: &u8) u8 {
+    pub const fn neg(self: &u8) u8 {
         return 0u32.wrapping_sub(*self) as u8;
     }
-    pub fn less(self: u8, other: u8) bool {
+    pub const fn less(self: u8, other: u8) bool {
         return self < other;
     }
-    pub fn less_equal(self: u8, other: u8) bool {
+    pub const fn less_equal(self: u8, other: u8) bool {
         return self <= other;
     }
-    pub fn greater(self: u8, other: u8) bool {
+    pub const fn greater(self: u8, other: u8) bool {
         return self > other;
     }
-    pub fn greater_equal(self: u8, other: u8) bool {
+    pub const fn greater_equal(self: u8, other: u8) bool {
         return self >= other;
     }
-    pub fn zero() u8 {
+    pub const fn zero() u8 {
         return 0;
     }
-    pub fn one() u8 {
+    pub const fn one() u8 {
         return 1;
     }
-    pub fn from_f64(v: f64) u8 {
+    pub const fn from_f64(v: f64) u8 {
         return v as u8;
     }
-    pub fn from_f32(v: f32) u8 {
+    pub const fn from_f32(v: f32) u8 {
         return v as u8;
     }
-    pub fn from_i64(v: i64) u8 {
+    pub const fn from_i64(v: i64) u8 {
         return v as u8;
     }
-    pub fn from_u64(v: u64) u8 {
+    pub const fn from_u64(v: u64) u8 {
         return v as u8;
     }
-    pub fn from_float<const E: usize, const F: usize, const FAM: sf::FloatFamily>(v: sf::Float<E, F, FAM>) u8 {
+    pub const fn from_float<const E: usize, const F: usize, const FAM: sf::FloatFamily>(v: sf::Float<E, F, FAM>) u8 {
         let mut r = si::UInt::<64>::zero();
         v.to_uint(&mut r);
         let x = r.to_u64();
@@ -1287,136 +1287,136 @@ extend u8 as Scalar {
         }
         return x as u8;
     }
-    pub fn from_uint<const M: usize>(v: si::UInt<M>) u8 {
+    pub const fn from_uint<const M: usize>(v: si::UInt<M>) u8 {
         return v.to_u64() as u8;
     }
-    pub fn from_int<const M: usize>(v: si::Int<M>) u8 {
+    pub const fn from_int<const M: usize>(v: si::Int<M>) u8 {
         return v.to_i64() as u8;
     }
-    pub fn from_decimal(v: f64, digits: str) u8 {
+    pub const fn from_decimal(v: f64, digits: str) u8 {
         return v as u8;
     }
-    pub fn cast<U: Scalar>(self: u8) U {
+    pub const fn cast<U: Scalar>(self: u8) U {
         return U::from_u64(self);
     }
-    pub fn push_name(s: &mut String) {
+    pub const fn push_name(s: &mut String) {
         s.push_str("u8");
     }
-    pub fn push_value(s: &mut String, v: u8) {
+    pub const fn push_value(s: &mut String, v: u8) {
         s.push_i64(v as i32);
     }
-    pub fn is_float() bool {
+    pub const fn is_float() bool {
         return false;
     }
-    pub fn is_signed() bool {
+    pub const fn is_signed() bool {
         return false;
     }
 }
 
 extend u8 as Int {
-    pub fn rem(self: &u8, other: &u8) u8 {
+    pub const fn rem(self: &u8, other: &u8) u8 {
         return *self % *other;
     }
-    pub fn bit_and(self: &u8, other: &u8) u8 {
+    pub const fn bit_and(self: &u8, other: &u8) u8 {
         return *self & *other;
     }
-    pub fn bit_or(self: &u8, other: &u8) u8 {
+    pub const fn bit_or(self: &u8, other: &u8) u8 {
         return *self | *other;
     }
-    pub fn bit_xor(self: &u8, other: &u8) u8 {
+    pub const fn bit_xor(self: &u8, other: &u8) u8 {
         return *self ^ *other;
     }
-    pub fn bit_not(self: &u8) u8 {
+    pub const fn bit_not(self: &u8) u8 {
         return ~*self;
     }
-    pub fn shl(self: &u8, n: u8) u8 {
+    pub const fn shl(self: &u8, n: u8) u8 {
         return ((*self) as i32 << n as i32) as u8;
     }
-    pub fn shr(self: &u8, n: u8) u8 {
+    pub const fn shr(self: &u8, n: u8) u8 {
         return ((*self) as i32 >> n as i32) as u8;
     }
-    pub fn count_ones(self: u8) i32 {
+    pub const fn count_ones(self: u8) i32 {
         return self.count_ones() as i32;
     }
-    pub fn leading_zeros(self: u8) i32 {
+    pub const fn leading_zeros(self: u8) i32 {
         return self.leading_zeros() as i32;
     }
-    pub fn trailing_zeros(self: u8) i32 {
+    pub const fn trailing_zeros(self: u8) i32 {
         return self.trailing_zeros() as i32;
     }
-    pub fn bits() i32 {
+    pub const fn bits() i32 {
         return 8;
     }
-    pub fn min_value() u8 {
+    pub const fn min_value() u8 {
         return u8::MIN;
     }
-    pub fn max_value() u8 {
+    pub const fn max_value() u8 {
         return u8::MAX;
     }
-    pub fn to_i64(self: u8) i64 {
+    pub const fn to_i64(self: u8) i64 {
         return self;
     }
-    pub fn to_u64(self: u8) u64 {
+    pub const fn to_u64(self: u8) u64 {
         return self;
     }
 }
 
 extend u16 as Elem {
-    pub fn equal(self: u16, other: u16) bool {
+    pub const fn equal(self: u16, other: u16) bool {
         return self == other;
     }
-    pub fn not_equal(self: u16, other: u16) bool {
+    pub const fn not_equal(self: u16, other: u16) bool {
         return self != other;
     }
 }
 
 extend u16 as Scalar {
-    pub fn add(self: &u16, other: &u16) u16 {
+    pub const fn add(self: &u16, other: &u16) u16 {
         return ((*self) as u32).wrapping_add(*other) as u16;
     }
-    pub fn sub(self: &u16, other: &u16) u16 {
+    pub const fn sub(self: &u16, other: &u16) u16 {
         return ((*self) as u32).wrapping_sub(*other) as u16;
     }
-    pub fn mul(self: &u16, other: &u16) u16 {
+    pub const fn mul(self: &u16, other: &u16) u16 {
         return ((*self) as u32).wrapping_mul(*other) as u16;
     }
-    pub fn div(self: &u16, other: &u16) u16 {
+    pub const fn div(self: &u16, other: &u16) u16 {
         return *self / *other;
     }
-    pub fn neg(self: &u16) u16 {
+    pub const fn neg(self: &u16) u16 {
         return 0u32.wrapping_sub(*self) as u16;
     }
-    pub fn less(self: u16, other: u16) bool {
+    pub const fn less(self: u16, other: u16) bool {
         return self < other;
     }
-    pub fn less_equal(self: u16, other: u16) bool {
+    pub const fn less_equal(self: u16, other: u16) bool {
         return self <= other;
     }
-    pub fn greater(self: u16, other: u16) bool {
+    pub const fn greater(self: u16, other: u16) bool {
         return self > other;
     }
-    pub fn greater_equal(self: u16, other: u16) bool {
+    pub const fn greater_equal(self: u16, other: u16) bool {
         return self >= other;
     }
-    pub fn zero() u16 {
+    pub const fn zero() u16 {
         return 0;
     }
-    pub fn one() u16 {
+    pub const fn one() u16 {
         return 1;
     }
-    pub fn from_f64(v: f64) u16 {
+    pub const fn from_f64(v: f64) u16 {
         return v as u16;
     }
-    pub fn from_f32(v: f32) u16 {
+    pub const fn from_f32(v: f32) u16 {
         return v as u16;
     }
-    pub fn from_i64(v: i64) u16 {
+    pub const fn from_i64(v: i64) u16 {
         return v as u16;
     }
-    pub fn from_u64(v: u64) u16 {
+    pub const fn from_u64(v: u64) u16 {
         return v as u16;
     }
-    pub fn from_float<const E: usize, const F: usize, const FAM: sf::FloatFamily>(v: sf::Float<E, F, FAM>) u16 {
+    pub const fn from_float<const E: usize, const F: usize, const FAM: sf::FloatFamily>(v: sf::Float<E, F, FAM>) u16 {
         let mut r = si::UInt::<64>::zero();
         v.to_uint(&mut r);
         let x = r.to_u64();
@@ -1425,136 +1425,136 @@ extend u16 as Scalar {
         }
         return x as u16;
     }
-    pub fn from_uint<const M: usize>(v: si::UInt<M>) u16 {
+    pub const fn from_uint<const M: usize>(v: si::UInt<M>) u16 {
         return v.to_u64() as u16;
     }
-    pub fn from_int<const M: usize>(v: si::Int<M>) u16 {
+    pub const fn from_int<const M: usize>(v: si::Int<M>) u16 {
         return v.to_i64() as u16;
     }
-    pub fn from_decimal(v: f64, digits: str) u16 {
+    pub const fn from_decimal(v: f64, digits: str) u16 {
         return v as u16;
     }
-    pub fn cast<U: Scalar>(self: u16) U {
+    pub const fn cast<U: Scalar>(self: u16) U {
         return U::from_u64(self);
     }
-    pub fn push_name(s: &mut String) {
+    pub const fn push_name(s: &mut String) {
         s.push_str("u16");
     }
-    pub fn push_value(s: &mut String, v: u16) {
+    pub const fn push_value(s: &mut String, v: u16) {
         s.push_i64(v as i32);
     }
-    pub fn is_float() bool {
+    pub const fn is_float() bool {
         return false;
     }
-    pub fn is_signed() bool {
+    pub const fn is_signed() bool {
         return false;
     }
 }
 
 extend u16 as Int {
-    pub fn rem(self: &u16, other: &u16) u16 {
+    pub const fn rem(self: &u16, other: &u16) u16 {
         return *self % *other;
     }
-    pub fn bit_and(self: &u16, other: &u16) u16 {
+    pub const fn bit_and(self: &u16, other: &u16) u16 {
         return *self & *other;
     }
-    pub fn bit_or(self: &u16, other: &u16) u16 {
+    pub const fn bit_or(self: &u16, other: &u16) u16 {
         return *self | *other;
     }
-    pub fn bit_xor(self: &u16, other: &u16) u16 {
+    pub const fn bit_xor(self: &u16, other: &u16) u16 {
         return *self ^ *other;
     }
-    pub fn bit_not(self: &u16) u16 {
+    pub const fn bit_not(self: &u16) u16 {
         return ~*self;
     }
-    pub fn shl(self: &u16, n: u16) u16 {
+    pub const fn shl(self: &u16, n: u16) u16 {
         return ((*self) as i32 << n as i32) as u16;
     }
-    pub fn shr(self: &u16, n: u16) u16 {
+    pub const fn shr(self: &u16, n: u16) u16 {
         return ((*self) as i32 >> n as i32) as u16;
     }
-    pub fn count_ones(self: u16) i32 {
+    pub const fn count_ones(self: u16) i32 {
         return self.count_ones() as i32;
     }
-    pub fn leading_zeros(self: u16) i32 {
+    pub const fn leading_zeros(self: u16) i32 {
         return self.leading_zeros() as i32;
     }
-    pub fn trailing_zeros(self: u16) i32 {
+    pub const fn trailing_zeros(self: u16) i32 {
         return self.trailing_zeros() as i32;
     }
-    pub fn bits() i32 {
+    pub const fn bits() i32 {
         return 16;
     }
-    pub fn min_value() u16 {
+    pub const fn min_value() u16 {
         return u16::MIN;
     }
-    pub fn max_value() u16 {
+    pub const fn max_value() u16 {
         return u16::MAX;
     }
-    pub fn to_i64(self: u16) i64 {
+    pub const fn to_i64(self: u16) i64 {
         return self;
     }
-    pub fn to_u64(self: u16) u64 {
+    pub const fn to_u64(self: u16) u64 {
         return self;
     }
 }
 
 extend u32 as Elem {
-    pub fn equal(self: u32, other: u32) bool {
+    pub const fn equal(self: u32, other: u32) bool {
         return self == other;
     }
-    pub fn not_equal(self: u32, other: u32) bool {
+    pub const fn not_equal(self: u32, other: u32) bool {
         return self != other;
     }
 }
 
 extend u32 as Scalar {
-    pub fn add(self: &u32, other: &u32) u32 {
+    pub const fn add(self: &u32, other: &u32) u32 {
         return self.wrapping_add(*other);
     }
-    pub fn sub(self: &u32, other: &u32) u32 {
+    pub const fn sub(self: &u32, other: &u32) u32 {
         return self.wrapping_sub(*other);
     }
-    pub fn mul(self: &u32, other: &u32) u32 {
+    pub const fn mul(self: &u32, other: &u32) u32 {
         return self.wrapping_mul(*other);
     }
-    pub fn div(self: &u32, other: &u32) u32 {
+    pub const fn div(self: &u32, other: &u32) u32 {
         return *self / *other;
     }
-    pub fn neg(self: &u32) u32 {
+    pub const fn neg(self: &u32) u32 {
         return self.wrapping_neg();
     }
-    pub fn less(self: u32, other: u32) bool {
+    pub const fn less(self: u32, other: u32) bool {
         return self < other;
     }
-    pub fn less_equal(self: u32, other: u32) bool {
+    pub const fn less_equal(self: u32, other: u32) bool {
         return self <= other;
     }
-    pub fn greater(self: u32, other: u32) bool {
+    pub const fn greater(self: u32, other: u32) bool {
         return self > other;
     }
-    pub fn greater_equal(self: u32, other: u32) bool {
+    pub const fn greater_equal(self: u32, other: u32) bool {
         return self >= other;
     }
-    pub fn zero() u32 {
+    pub const fn zero() u32 {
         return 0;
     }
-    pub fn one() u32 {
+    pub const fn one() u32 {
         return 1;
     }
-    pub fn from_f64(v: f64) u32 {
+    pub const fn from_f64(v: f64) u32 {
         return v as u32;
     }
-    pub fn from_f32(v: f32) u32 {
+    pub const fn from_f32(v: f32) u32 {
         return v as u32;
     }
-    pub fn from_i64(v: i64) u32 {
+    pub const fn from_i64(v: i64) u32 {
         return v as u32;
     }
-    pub fn from_u64(v: u64) u32 {
+    pub const fn from_u64(v: u64) u32 {
         return v as u32;
     }
-    pub fn from_float<const E: usize, const F: usize, const FAM: sf::FloatFamily>(v: sf::Float<E, F, FAM>) u32 {
+    pub const fn from_float<const E: usize, const F: usize, const FAM: sf::FloatFamily>(v: sf::Float<E, F, FAM>) u32 {
         let mut r = si::UInt::<64>::zero();
         v.to_uint(&mut r);
         let x = r.to_u64();
@@ -1563,211 +1563,211 @@ extend u32 as Scalar {
         }
         return x as u32;
     }
-    pub fn from_uint<const M: usize>(v: si::UInt<M>) u32 {
+    pub const fn from_uint<const M: usize>(v: si::UInt<M>) u32 {
         return v.to_u64() as u32;
     }
-    pub fn from_int<const M: usize>(v: si::Int<M>) u32 {
+    pub const fn from_int<const M: usize>(v: si::Int<M>) u32 {
         return v.to_i64() as u32;
     }
-    pub fn from_decimal(v: f64, digits: str) u32 {
+    pub const fn from_decimal(v: f64, digits: str) u32 {
         return v as u32;
     }
-    pub fn cast<U: Scalar>(self: u32) U {
+    pub const fn cast<U: Scalar>(self: u32) U {
         return U::from_u64(self);
     }
-    pub fn push_name(s: &mut String) {
+    pub const fn push_name(s: &mut String) {
         s.push_str("u");
     }
-    pub fn push_value(s: &mut String, v: u32) {
+    pub const fn push_value(s: &mut String, v: u32) {
         s.push_i64(v as i32);
     }
-    pub fn is_float() bool {
+    pub const fn is_float() bool {
         return false;
     }
-    pub fn is_signed() bool {
+    pub const fn is_signed() bool {
         return false;
     }
 }
 
 extend u32 as Int {
-    pub fn rem(self: &u32, other: &u32) u32 {
+    pub const fn rem(self: &u32, other: &u32) u32 {
         return *self % *other;
     }
-    pub fn bit_and(self: &u32, other: &u32) u32 {
+    pub const fn bit_and(self: &u32, other: &u32) u32 {
         return *self & *other;
     }
-    pub fn bit_or(self: &u32, other: &u32) u32 {
+    pub const fn bit_or(self: &u32, other: &u32) u32 {
         return *self | *other;
     }
-    pub fn bit_xor(self: &u32, other: &u32) u32 {
+    pub const fn bit_xor(self: &u32, other: &u32) u32 {
         return *self ^ *other;
     }
-    pub fn bit_not(self: &u32) u32 {
+    pub const fn bit_not(self: &u32) u32 {
         return ~*self;
     }
-    pub fn shl(self: &u32, n: u32) u32 {
+    pub const fn shl(self: &u32, n: u32) u32 {
         return *self << n;
     }
-    pub fn shr(self: &u32, n: u32) u32 {
+    pub const fn shr(self: &u32, n: u32) u32 {
         return *self >> n;
     }
-    pub fn count_ones(self: u32) i32 {
+    pub const fn count_ones(self: u32) i32 {
         return self.count_ones() as i32;
     }
-    pub fn leading_zeros(self: u32) i32 {
+    pub const fn leading_zeros(self: u32) i32 {
         return self.leading_zeros() as i32;
     }
-    pub fn trailing_zeros(self: u32) i32 {
+    pub const fn trailing_zeros(self: u32) i32 {
         return self.trailing_zeros() as i32;
     }
-    pub fn bits() i32 {
+    pub const fn bits() i32 {
         return 32;
     }
-    pub fn min_value() u32 {
+    pub const fn min_value() u32 {
         return u32::MIN;
     }
-    pub fn max_value() u32 {
+    pub const fn max_value() u32 {
         return u32::MAX;
     }
-    pub fn to_i64(self: u32) i64 {
+    pub const fn to_i64(self: u32) i64 {
         return self;
     }
-    pub fn to_u64(self: u32) u64 {
+    pub const fn to_u64(self: u32) u64 {
         return self;
     }
 }
 
 extend u64 as Elem {
-    pub fn equal(self: u64, other: u64) bool {
+    pub const fn equal(self: u64, other: u64) bool {
         return self == other;
     }
-    pub fn not_equal(self: u64, other: u64) bool {
+    pub const fn not_equal(self: u64, other: u64) bool {
         return self != other;
     }
 }
 
 extend u64 as Scalar {
-    pub fn add(self: &u64, other: &u64) u64 {
+    pub const fn add(self: &u64, other: &u64) u64 {
         return self.wrapping_add(*other);
     }
-    pub fn sub(self: &u64, other: &u64) u64 {
+    pub const fn sub(self: &u64, other: &u64) u64 {
         return self.wrapping_sub(*other);
     }
-    pub fn mul(self: &u64, other: &u64) u64 {
+    pub const fn mul(self: &u64, other: &u64) u64 {
         return self.wrapping_mul(*other);
     }
-    pub fn div(self: &u64, other: &u64) u64 {
+    pub const fn div(self: &u64, other: &u64) u64 {
         return *self / *other;
     }
-    pub fn neg(self: &u64) u64 {
+    pub const fn neg(self: &u64) u64 {
         return self.wrapping_neg();
     }
-    pub fn less(self: u64, other: u64) bool {
+    pub const fn less(self: u64, other: u64) bool {
         return self < other;
     }
-    pub fn less_equal(self: u64, other: u64) bool {
+    pub const fn less_equal(self: u64, other: u64) bool {
         return self <= other;
     }
-    pub fn greater(self: u64, other: u64) bool {
+    pub const fn greater(self: u64, other: u64) bool {
         return self > other;
     }
-    pub fn greater_equal(self: u64, other: u64) bool {
+    pub const fn greater_equal(self: u64, other: u64) bool {
         return self >= other;
     }
-    pub fn zero() u64 {
+    pub const fn zero() u64 {
         return 0;
     }
-    pub fn one() u64 {
+    pub const fn one() u64 {
         return 1;
     }
-    pub fn from_f64(v: f64) u64 {
+    pub const fn from_f64(v: f64) u64 {
         return v as u64;
     }
-    pub fn from_f32(v: f32) u64 {
+    pub const fn from_f32(v: f32) u64 {
         return v as u64;
     }
-    pub fn from_i64(v: i64) u64 {
+    pub const fn from_i64(v: i64) u64 {
         return v as u64;
     }
-    pub fn from_u64(v: u64) u64 {
+    pub const fn from_u64(v: u64) u64 {
         return v;
     }
-    pub fn from_float<const E: usize, const F: usize, const FAM: sf::FloatFamily>(v: sf::Float<E, F, FAM>) u64 {
+    pub const fn from_float<const E: usize, const F: usize, const FAM: sf::FloatFamily>(v: sf::Float<E, F, FAM>) u64 {
         let mut r = si::UInt::<64>::zero();
         v.to_uint(&mut r);
         let x = r.to_u64();
         return x;
     }
-    pub fn from_uint<const M: usize>(v: si::UInt<M>) u64 {
+    pub const fn from_uint<const M: usize>(v: si::UInt<M>) u64 {
         return v.to_u64();
     }
-    pub fn from_int<const M: usize>(v: si::Int<M>) u64 {
+    pub const fn from_int<const M: usize>(v: si::Int<M>) u64 {
         return v.to_i64() as u64;
     }
-    pub fn from_decimal(v: f64, digits: str) u64 {
+    pub const fn from_decimal(v: f64, digits: str) u64 {
         return v as u64;
     }
-    pub fn cast<U: Scalar>(self: u64) U {
+    pub const fn cast<U: Scalar>(self: u64) U {
         return U::from_u64(self);
     }
-    pub fn push_name(s: &mut String) {
+    pub const fn push_name(s: &mut String) {
         s.push_str("u64");
     }
-    pub fn push_value(s: &mut String, v: u64) {
+    pub const fn push_value(s: &mut String, v: u64) {
         s.push_i64(v as i32);
     }
-    pub fn is_float() bool {
+    pub const fn is_float() bool {
         return false;
     }
-    pub fn is_signed() bool {
+    pub const fn is_signed() bool {
         return false;
     }
 }
 
 extend u64 as Int {
-    pub fn rem(self: &u64, other: &u64) u64 {
+    pub const fn rem(self: &u64, other: &u64) u64 {
         return *self % *other;
     }
-    pub fn bit_and(self: &u64, other: &u64) u64 {
+    pub const fn bit_and(self: &u64, other: &u64) u64 {
         return *self & *other;
     }
-    pub fn bit_or(self: &u64, other: &u64) u64 {
+    pub const fn bit_or(self: &u64, other: &u64) u64 {
         return *self | *other;
     }
-    pub fn bit_xor(self: &u64, other: &u64) u64 {
+    pub const fn bit_xor(self: &u64, other: &u64) u64 {
         return *self ^ *other;
     }
-    pub fn bit_not(self: &u64) u64 {
+    pub const fn bit_not(self: &u64) u64 {
         return ~*self;
     }
-    pub fn shl(self: &u64, n: u64) u64 {
+    pub const fn shl(self: &u64, n: u64) u64 {
         return *self << n;
     }
-    pub fn shr(self: &u64, n: u64) u64 {
+    pub const fn shr(self: &u64, n: u64) u64 {
         return *self >> n;
     }
-    pub fn count_ones(self: u64) i32 {
+    pub const fn count_ones(self: u64) i32 {
         return self.count_ones() as i32;
     }
-    pub fn leading_zeros(self: u64) i32 {
+    pub const fn leading_zeros(self: u64) i32 {
         return self.leading_zeros() as i32;
     }
-    pub fn trailing_zeros(self: u64) i32 {
+    pub const fn trailing_zeros(self: u64) i32 {
         return self.trailing_zeros() as i32;
     }
-    pub fn bits() i32 {
+    pub const fn bits() i32 {
         return 64;
     }
-    pub fn min_value() u64 {
+    pub const fn min_value() u64 {
         return u64::MIN;
     }
-    pub fn max_value() u64 {
+    pub const fn max_value() u64 {
         return u64::MAX;
     }
-    pub fn to_i64(self: u64) i64 {
+    pub const fn to_i64(self: u64) i64 {
         return self as i64;
     }
-    pub fn to_u64(self: u64) u64 {
+    pub const fn to_u64(self: u64) u64 {
         return self;
     }
 }

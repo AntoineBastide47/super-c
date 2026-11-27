@@ -43,7 +43,9 @@ program's readable C11 instead (Generated Output in [generated-output.md](refere
 `release`, `bench` and `test` profiles) runs the LIR optimizer first: inlining, value numbering, load and
 store forwarding, loop transforms, constant and branch folding (`SC_LIR_OPT` overrides the
 choice; Optimization levels and code-generation flags in [build-toml.md](references/build-toml.md)). The objects carry DWARF line tables when the profile's `debug` key is set (`debug`, `bench`),
-and unwind data always. The extern blocks read the target's C headers (`native_header_facts`): the C
+and unwind data always. The extern blocks read the target's C headers (`native_header_facts`; under
+`--emit-c` too when the program loads `std::crypto::secret`, whose constant-time functions the native
+backend compiles into the tree's `__sc_ct.o`): the C
 library's development package on Linux, the macOS SDK, mingw-w64's tree on Windows (found beside a
 mingw `gcc` or `clang` in PATH), a WASI sysroot (`WASI_SDK_PATH`, else `WASI_SYSROOT`) for wasm, or the
 tree `--sysroot=DIR` names. The single binary `super-c` drives every stage of the workflow.

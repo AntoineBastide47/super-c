@@ -180,6 +180,7 @@ pub(package) struct Asm {
     refs: Vector<Ref>,
     globals: Vector<String>,
     hidden: Vector<String>,
+    alts: Vector<String>, // `.alt_entry`: global labels inside the code before them (`ob::SF_ALT`)
     funcs: Vector<String>,
     cfi: Cfi,
     seh: Seh,
@@ -211,6 +212,7 @@ extend Asm {
             refs: Vector::<Ref>::new(),
             globals: Vector::<String>::new(),
             hidden: Vector::<String>::new(),
+            alts: Vector::<String>::new(),
             funcs: Vector::<String>::new(),
             cfi: Cfi { open: false, sec: 0, start: 0, last: 0, cfa: 0, at: 0, stack: Vector::<i64>::new() },
             seh: Seh {
@@ -310,6 +312,9 @@ extend Asm {
                 if Asm::listed(&self.hidden, &g) {
                     fl |= ob::SF_HIDDEN;
                 }
+                if Asm::listed(&self.alts, &g) {
+                    fl |= ob::SF_ALT;
+                }
                 let y = o.syms.index_mut(k as usize);
                 y.sec = l.sec;
                 y.off = l.off;
@@ -374,6 +379,7 @@ extend Asm {
                 if !self.patch(o, r.sec, r.off, r.kind, off) {
                     return self.fail(format("'{}' is out of the instruction's reach", r.name.as_str()).as_str());
                 }
+                self.one_part(o, r.sec, r.off, self.labels[li as usize].off);
                 continue;
             }
             if r.kind == aa::FX_B19 || r.kind == aa::FX_B14 || r.kind == aa::FX_ADR {
@@ -389,7 +395,7 @@ extend Asm {
                 let y = o.syms.index_mut(s as usize);
                 y.sec = l.sec;
                 y.off = l.off;
-                y.flags = 0;
+                y.flags = ob::SF_ALT;
                 s
             } else {
                 o.sym(self.c_name(&r.name))
@@ -397,6 +403,21 @@ extend Asm {
             o.reloc(r.sec, r.kind, r.off, k, r.addend);
         }
         return true;
+    }
+
+    // A writer that gives each function its own section (`ob::parts_of`) and a Mach-O linker
+    // (`MH_SUBSECTIONS_VIA_SYMBOLS`) split a section at its symbols, then keep, drop and place each part on
+    // its own: a reference resolved in place from offset `a` of section `sec` to `b` has no relocation
+    // that ties two parts, so no symbol after the lower offset up to the higher one starts a part
+    // (`ob::SF_ALT`).
+    fn one_part(self: &Self, o: &mut ob::Obj, sec: u8, a: u64, b: u64) {
+        let (lo, hi) = (a.min(b), a.max(b));
+        for k in 0..o.syms.len() {
+            let y = o.syms[k];
+            if y.sec == sec && y.off > lo && y.off <= hi {
+                o.syms.index_mut(k).flags |= ob::SF_ALT;
+            }
+        }
     }
 
     // Whether a reference of kind `k` to a label of its own section resolves in place.
@@ -554,6 +575,9 @@ extend Asm {
         if d == ".hidden" || d == ".private_extern" {
             return self.names(rest, 1);
         }
+        if d == ".alt_entry" {
+            return self.names(rest, 2);
+        }
         if d == ".type" {
             // `.type name, @function` (`%function`, `STT_FUNC`).
             let c = rest.find_byte(b',');
@@ -674,6 +698,8 @@ extend Asm {
                 if !Asm::listed(&self.globals, n) {
                     self.globals.push(String::from_str(n));
                 }
+            } else if what == 2 {
+                self.alts.push(String::from_str(n));
             } else {
                 self.hidden.push(String::from_str(n));
                 if !Asm::listed(&self.globals, n) {

@@ -50,8 +50,10 @@ pub(package) const FOLD_SINC: u64 = 274877906944;
 /// one instruction of its block reads: that instruction extends its operand (wasm32's `i64.extend_i32_*` at
 /// the use, no local; a narrow integer's location holds it zero-extended).
 pub(package) const FOLD_WIDEN: u64 = 549755813888;
-/// A store's value, a select's side or its folded comparison's operand, or an integer operation's second
-/// operand when its first stays (a parameter, a constant, a value of more uses; for a commutative one, the
+/// A store's value, a select's side or its folded comparison's operand, a narrow integer load that a sign
+/// extension or a zero extension to 64 bits reads (one folded into its reader too, `FOLD_WIDEN`: wasm32's
+/// extending loads), or an integer operation's
+/// second operand when its first stays (a parameter, a constant, a value of more uses; for a commutative one, the
 /// second not made right before it, which it reads first), that one instruction of
 /// its block makes and only that reads: an integer operation that cannot trap (no division), a bit count,
 /// a select or a scalar load,
@@ -72,6 +74,23 @@ pub(package) const FOLD_VSINK: u64 = 8796093022208;
 pub(package) const FOLD_CARRY: u64 = 16384;
 pub(package) const FOLD_FSEL: u64 = 32768;
 pub(package) const FOLD_NOT: u64 = 65536;
+/// `FOLD_NOT` for `and` alone (x86-64 BMI1's `andn`).
+pub(package) const FOLD_ANDN: u64 = 72057594037927936;
+/// `x - 1` or `-x` whose every use is an `and` (`xor` for `x - 1`) with `x`, which folds nothing or only
+/// equalities with 0 read: it folds into each (x86-64 BMI1's `blsr`, `blsi`, `blsmsk`; `bls_parts`).
+pub(package) const FOLD_BLS: u64 = 144115188075855872;
+/// A load of 32 or 64 bits that a byte reversal alone reads, with no write of memory between, folds into
+/// the reversal; a byte reversal of 16, 32 or 64 bits that a store alone reads, of no folded load, folds
+/// into the store (x86-64's `movbe`).
+pub(package) const FOLD_MOVBE: u64 = 288230376151711744;
+/// A load that de-interleaving shuffles of a group of three alone read (`Live::ld3_field`): each shuffle
+/// loads the group itself (arm64's `ld3`).
+pub(package) const FOLD_LD3: u64 = 576460752303423488;
+/// The mask bits that masked loads and stores through a pointer alone read (`pred_mask`) and what makes
+/// them: a lane comparison, which each access makes into a predicate itself (arm64 SVE's CMPHI and the
+/// like), or the sum and the AND of a lane mask, each access's predicate the lane mask's (CMPNE). A vector
+/// of zeros those loads alone read as their fallback, which their predicated loads give.
+pub(package) const FOLD_PRED: u64 = 1152921504606846976;
 pub(package) const FOLD_XBFX: u64 = 131072;
 pub(package) const FOLD_BFI: u64 = 262144;
 /// A load's or store's folded index that is the 64-bit zero or sign extension of a 32-bit value (or of an
@@ -206,6 +225,8 @@ pub(package) const CARRY_ADC: u8 = 3;
 pub(package) const MASK_DEPTH: u32 = 8;
 // `Live::ldop_user` looks this many instructions past a load for its use.
 const LDOP_REACH: u32 = 16;
+// The instructions from a group's first load to a shuffle of it (`Live::ld3_field`).
+const LD3_REACH: u32 = 64;
 /// The most calls outside rare blocks whose live values a generator reads (`lives_across` reads every
 /// value per call) when it chooses where a body sets its frame up. A body with more sets it up late only
 /// when it has at most WARM_SIZE instructions (a try that fails compiles the body again) and the frame's
@@ -334,6 +355,9 @@ pub(package) struct Live {
     /// load or store takes its address `ptradd`'s operands (`fold`), and whether the `ptradd` emits nothing
     /// for that (`pfold`; `uses_at`).
     pub(package) fold_max: u32,
+    /// With `FOLD_PRED`: every masked access may take an SVE predicate (the body has SVE), not only those
+    /// that run where the processor has it (`VOP_PRED`).
+    pub(package) pred_all: bool,
     pub(package) fold: Vector<bool>,
     pub(package) pfold: Vector<bool>,
     /// Per instruction, a truncation to 8 or 16 bits that comparisons alone read, more than one, under
@@ -566,6 +590,7 @@ extend Live {
             flag_of: Vector::<u32>::new(),
             late: Vector::<u64>::new(),
             fold_max: 0,
+            pred_all: false,
             fold: Vector::<bool>::new(),
             pfold: Vector::<bool>::new(),
             xtrunc: Vector::<bool>::new(),
@@ -797,8 +822,9 @@ extend Live {
         self.rare_blocks(b);
         self.loops(b);
         self.frequencies(b);
-        self.folds(b);
+        // Before the folds, which read it (`pred_sels`).
         self.def_blocks(b, b.insts.len() + b.params.len());
+        self.folds(b);
     }
 
     // `def_blk` for the `n` value indexes of `b`: each instruction's and block parameter's block (NONE for
@@ -951,8 +977,9 @@ extend Live {
 
     // `FOLD_SHAMT`: a 32- or 64-bit shift's count that an `and` with the width's mask (`& 31`, `& 63`) makes,
     // read only there, folds into the shift, which takes the count modulo the width.
-    // `FOLD_SINK`: the values stores, selects and integer operations compute where they read them
-    // (`sinkable`): a store's value, a select's sides and its folded comparison's operands, an operation's
+    // `FOLD_SINK`: the values stores, selects, extensions and integer operations compute where they read
+    // them (`sinkable`): a store's value, a select's sides and its folded comparison's operands, the narrow
+    // load an unfolded sign extension or zero extension to 64 bits reads (one extending load), an operation's
     // second operand past a first that stays (which the set and get of `stack_values` cannot keep on the
     // stack: the first operand comes between); a vector shift's count stays (one not the same in every lane
     // makes the shift go through memory).
@@ -985,6 +1012,11 @@ extend Live {
                         self.read_of(b, st.b)
                     };
                     self.sink(b, sb, bk.start, s, &mut moved);
+                } else if (st.op == O_SEXT || st.op == O_ZEXT && st.ty == T_I64) && !self.pfold[s as usize] && narrow_load(
+                    b,
+                    st.a,
+                ) {
+                    self.sink(b, st.a, bk.start, s, &mut moved);
                 } else if st.op == O_SELECT && is_int(st.ty) && st.ty != T_I128 {
                     self.sink(b, st.b, bk.start, s, &mut moved);
                     self.sink(b, st.c, bk.start, s, &mut moved);
@@ -992,6 +1024,19 @@ extend Live {
                         let c = b.insts[st.a as usize];
                         self.sink(b, c.a, bk.start, s, &mut moved);
                         self.sink(b, c.b, bk.start, s, &mut moved);
+                    }
+                }
+                // A narrow load that an extension folded into this reader extends (`FOLD_WIDEN`) moves with it.
+                if (self.fold_ops & FOLD_WIDEN) != 0 {
+                    each_use(b, st, &mut us);
+                    for q in 0..us.len() {
+                        let x = us[q];
+                        if is_inst(x) && self.pfold[x as usize] && (b.insts[x as usize].op == O_SEXT || b.insts[x as usize].op == O_ZEXT) && narrow_load(
+                            b,
+                            b.insts[x as usize].a,
+                        ) {
+                            self.sink(b, b.insts[x as usize].a, bk.start, s, &mut moved);
+                        }
                     }
                 }
                 // The reader's folded instructions stay within FOLD_DEPTH (`uses_at`), else nothing moves.
@@ -1584,6 +1629,65 @@ extend Live {
             }
             k = e;
         }
+        if (self.fold_ops & FOLD_PRED) != 0 {
+            let mut preds = Vector::<Value>::new();
+            let mut zeros = Vector::<Value>::new();
+            self.scan_ops([O_VOP]);
+            for q in 0..self.scan.len() {
+                let t = b.insts[self.scan[q] as usize];
+                if (self.pred_all || (t.aux & VOP_PRED) != 0) && pred_mask(b, t).1 != VNONE {
+                    preds.push(b.pool[(t.a + 1) as usize]);
+                    if t.ty != T_NONE && zero_vec(b, b.pool[(t.a + 2) as usize]) {
+                        zeros.push(b.pool[(t.a + 2) as usize]);
+                    }
+                }
+            }
+            preds.sort();
+            let mut k: usize = 0;
+            while k < preds.len() {
+                let mut e = k + 1;
+                while e < preds.len() && preds[e] == preds[k] {
+                    e += 1;
+                }
+                if (e - k) as u32 == self.count[preds[k] as usize] && self.pred_chain(b, preds[k], false) {
+                    let _ = self.pred_chain(b, preds[k], true);
+                }
+                k = e;
+            }
+            // A lane comparison that selects alone read, each after an access of its block that takes it as its
+            // predicate, folds: the select is SVE's SEL by that predicate.
+            let mut sels = Vector::<Value>::new();
+            let mut done = NONE;
+            for q in 0..self.scan.len() {
+                let i = self.scan[q];
+                let k = self.def_blk[i as usize];
+                if k != done && self.pred_folded(b, b.insts[i as usize]) {
+                    self.pred_sels(b, k, &mut sels);
+                    done = k;
+                }
+            }
+            sels.sort();
+            k = 0;
+            while k < sels.len() {
+                let mut e = k + 1;
+                while e < sels.len() && sels[e] == sels[k] {
+                    e += 1;
+                }
+                self.pfold[sels[k] as usize] = (e - k) as u32 == self.count[sels[k] as usize];
+                k = e;
+            }
+            // A zero fallback folds where every load that reads it folds its mask.
+            zeros.sort();
+            k = 0;
+            while k < zeros.len() {
+                let mut e = k + 1;
+                while e < zeros.len() && zeros[e] == zeros[k] {
+                    e += 1;
+                }
+                self.pfold[zeros[k] as usize] = (e - k) as u32 == self.count[zeros[k] as usize];
+                k = e;
+            }
+        }
         if (self.fold_ops & FOLD_FREE_ZEXT) != 0 {
             // A truncation's uses as a select's side its condition bounds (`bounded_side`).
             fill(&mut self.cnd, ni, 0);
@@ -1813,12 +1917,13 @@ extend Live {
         // `FOLD_NOT`: an inversion (`not`, or `xor` with all ones) whose one use is an `and`, `or` or `xor` of
         // at most 64 bits, whose other operand and the inverted value fold nothing, folds into it (arm64
         // `bic`, `orn`, `eon`: `not_side`).
-        if (self.fold_ops & FOLD_NOT) != 0 {
+        if (self.fold_ops & (FOLD_NOT | FOLD_ANDN)) != 0 {
+            let all = (self.fold_ops & FOLD_NOT) != 0;
             self.scan_ops([O_AND, O_OR, O_XOR]);
             for q in 0..self.scan.len() {
                 let i = self.scan[q] as usize;
                 let t = b.insts[i];
-                if t.op != O_AND && t.op != O_OR && t.op != O_XOR || !is_int(t.ty) || t.ty == T_I128 || self.pfold[i] {
+                if t.op != O_AND && (t.op != O_OR && t.op != O_XOR || !all) || !is_int(t.ty) || t.ty == T_I128 || self.pfold[i] {
                     continue;
                 }
                 for side in 0..2 {
@@ -1834,6 +1939,39 @@ extend Live {
                         self.pfold[s as usize] = true;
                         break;
                     }
+                }
+            }
+        }
+        // `FOLD_BLS`: `x - 1` or `-x` whose every use is an `and` (`xor` for `x - 1`) with `x` (`bls_parts`)
+        // that folds nothing, or an `and` an equality with 0 alone reads (`FOLD_TST`). `cnd` counts an
+        // `and`'s tests first, then each inner value's uses that take it.
+        if (self.fold_ops & FOLD_BLS) != 0 {
+            fill(&mut self.cnd, ni, 0);
+            self.scan_ops([O_ICMP]);
+            for q in 0..self.scan.len() {
+                let t = b.insts[self.scan[q] as usize];
+                if (t.aux == C_EQ || t.aux == C_NE) && is_inst(t.a) && b.insts[t.a as usize].op == O_AND && int_const(
+                    b,
+                    t.b,
+                ) == 0 {
+                    self.cnd[t.a as usize] += 1;
+                }
+            }
+            self.scan_ops([O_AND, O_XOR]);
+            for q in 0..self.scan.len() {
+                let i = self.scan[q] as usize;
+                let t = b.insts[i];
+                let tested = t.op == O_AND && self.count[i] != 0 && self.cnd[i] == self.count[i];
+                let (kind, s, x) = bls_parts(b, t);
+                if kind != 0 && (!self.pfold[i] || tested) && !(is_inst(x) && self.pfold[x as usize]) {
+                    self.cnd[s as usize] += 1;
+                }
+            }
+            self.scan_ops([O_ADD, O_SUB, O_NEG]);
+            for q in 0..self.scan.len() {
+                let s = self.scan[q] as usize;
+                if self.cnd[s] != 0 && self.cnd[s] == self.count[s] && !self.pfold[s] {
+                    self.pfold[s] = true;
                 }
             }
         }
@@ -1973,6 +2111,48 @@ extend Live {
                 }
             }
         }
+        // `FOLD_MOVBE`: the loads byte reversals alone read, then the reversals stores alone read.
+        if (self.fold_ops & FOLD_MOVBE) != 0 {
+            self.block_ops(b, O_BSWAP);
+            for q in 0..self.scan.len() {
+                let i = self.scan[q];
+                let t = b.insts[i as usize];
+                let bits = type_bits(t.ty, 8);
+                if is_vec(t.ty) || bits != 32 && bits != 64 || self.pfold[i as usize] || !is_inst(t.a) || t.a < b.blocks[self.iblk[i as usize] as usize].start {
+                    continue;
+                }
+                let l = b.insts[t.a as usize];
+                if l.op != O_LOAD || l.ty != t.ty || (l.aux & MEM_VOLATILE) != 0 || self.count[t.a as usize] != 1 || self.pfold[t.a as usize] || self.reg_param(
+                    b,
+                    l.a,
+                ) {
+                    continue;
+                }
+                let mut clean = true;
+                for j in t.a + 1..i {
+                    clean = clean && !writes_mem(b.insts[j as usize]);
+                }
+                if clean {
+                    self.pfold[t.a as usize] = true;
+                }
+            }
+            self.block_ops(b, O_STORE);
+            for q in 0..self.scan.len() {
+                let i = self.scan[q];
+                let st = b.insts[i as usize];
+                let v = st.b;
+                if !is_inst(v) || self.pfold[v as usize] || self.count[v as usize] != 1 || (st.aux & MEM_VOLATILE) != 0 {
+                    continue;
+                }
+                let r = b.insts[v as usize];
+                let bits = type_bits(r.ty, 8);
+                if r.op == O_BSWAP && !is_vec(r.ty) && bits >= 16 && bits <= 64 && v >= b.blocks[self.iblk[i as usize] as usize].start && !(is_inst(
+                    r.a,
+                ) && self.pfold[r.a as usize]) {
+                    self.pfold[v as usize] = true;
+                }
+            }
+        }
         if (self.fold_ops & (FOLD_VSHIMM | FOLD_VSHIMM_ALL)) != 0 {
             fill(&mut self.cnd, ni, 0);
             self.scan_ops([O_SHL, O_LSHR, O_ASHR]);
@@ -2049,6 +2229,93 @@ extend Live {
         if (self.fold_ops & FOLD_VIEW) != 0 {
             self.views(b);
         }
+        // `FOLD_LD3` last: a shuffle another fold took loads nothing.
+        if (self.fold_ops & FOLD_LD3) != 0 {
+            self.block_ops(b, O_VOP);
+            for q in 0..self.scan.len() {
+                let i = self.scan[q];
+                if self.pfold[i as usize] || self.ld3_field(b, i) == NONE {
+                    continue;
+                }
+                let t = b.insts[i as usize];
+                for o in 0..3u32 {
+                    let v = b.pool[(t.a + o) as usize];
+                    if self.pfold[v as usize] {
+                        continue;
+                    }
+                    // Every read of the load is such a shuffle.
+                    let mut k: u32 = 0;
+                    let end = (b.blocks[self.iblk[v as usize] as usize].start + b.blocks[self.iblk[v as usize] as usize].len).min(
+                        v + 1 + LD3_REACH,
+                    );
+                    for j in v + 1..end {
+                        let u = b.insts[j as usize];
+                        if u.op == O_VOP && !self.pfold[j as usize] && self.ld3_field(b, j) != NONE {
+                            for w in 0..3u32 {
+                                k += (b.pool[(u.a + w) as usize] == v) as u32;
+                            }
+                        }
+                    }
+                    if k == self.count[v as usize] {
+                        self.pfold[v as usize] = true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// The field (0 to 2) that `vop` shuffle `i` of `b` takes from a group of three, or NONE: its operands
+    /// three loads of its type (8 or 16 bytes, lanes below 8 bytes in 8) from one address at offsets `c`,
+    /// `c + n`, `c + 2n` (`n` its bytes), its lanes `r`, `r + 3`, `r + 6`, ..; within LD3_REACH of the first
+    /// load in its block, no write of memory between (arm64's `ld3` reads the memory at the shuffle).
+    pub(package) const fn ld3_field(self: &Self, b: &Body, i: u32) u32 {
+        let t = b.insts[i as usize];
+        // The block table (`block_ops`) is the analysis's under `FOLD_LD3` alone.
+        if !self.iblk_ok || t.op != O_VOP || (t.aux & VOP_CODE) as u32 != core::OP_SIMD + core::SIMD_SHUFFLE as u32 || t.b != 3 || t.c == VNONE || !is_vec(
+            t.ty,
+        ) {
+            return NONE;
+        }
+        let nb = type_bytes(t.ty, 8);
+        let n = lanes(t.ty);
+        if nb != 8 && nb != 16 || nb == 8 && n == 1 || b.pool[t.c as usize] != n {
+            return NONE;
+        }
+        let r = b.pool[(t.c + 1) as usize];
+        if r > 2 {
+            return NONE;
+        }
+        for m in 0..n {
+            if b.pool[(t.c + 1 + m) as usize] != r + 3 * m {
+                return NONE;
+            }
+        }
+        let v0 = b.pool[t.a as usize];
+        if !is_inst(v0) {
+            return NONE;
+        }
+        let l0 = b.insts[v0 as usize];
+        let mut first = v0;
+        for o in 0..3u32 {
+            let v = b.pool[(t.a + o) as usize];
+            if !is_inst(v) || self.iblk[v as usize] != self.iblk[i as usize] {
+                return NONE;
+            }
+            let l = b.insts[v as usize];
+            if l.op != O_LOAD || l.ty != t.ty || (l.aux & MEM_VOLATILE) != 0 || l.a != l0.a || l.c as i32 != l0.c as i32 + (o * nb) as i32 {
+                return NONE;
+            }
+            first = first.min(v);
+        }
+        if i - first > LD3_REACH {
+            return NONE;
+        }
+        for j in first + 1..i {
+            if writes_mem(b.insts[j as usize]) {
+                return NONE;
+            }
+        }
+        return r;
     }
 
     // `FOLD_VIEW`, after every other fold: `view` per instruction no fold takes, whose operand is no folded
@@ -3135,6 +3402,64 @@ extend Live {
         return (self.fold_ops & f) != 0 && (lane_mask(b, v, MASK_DEPTH) || (self.fold_ops & FOLD_ANY_BITS) != 0 && is_int(
             lane_type(b.type_of(v)),
         ));
+    }
+
+    // Whether masked access `t` takes an SVE predicate (`FOLD_PRED`): its mask bits fold.
+    const fn pred_folded(self: &Self, b: &Body, t: Inst) bool {
+        if t.op != O_VOP || !self.pred_all && (t.aux & VOP_PRED) == 0 || pred_mask(b, t).1 == VNONE {
+            return false;
+        }
+        let m = b.pool[(t.a + 1) as usize];
+        return is_inst(m) && self.pfold[m as usize];
+    }
+
+    // Into `out`, the lane comparisons of block `k` that its selects read after a masked access whose folded
+    // predicate (`pred_folded`, `pred_mask`) is that comparison, with no call or other predicate between: p0
+    // holds it there.
+    const fn pred_sels(self: &Self, b: &Body, k: u32, out: &mut Vector<Value>) {
+        let bk = b.blocks[k as usize];
+        let mut key: (u16, Value, Value) = (C_COUNT, VNONE, VNONE);
+        for j in bk.start..bk.start + bk.len {
+            let t = b.insts[j as usize];
+            if t.op == O_CALL || t.op == O_CALLIND || t.op == O_ASM {
+                key = (C_COUNT, VNONE, VNONE);
+            } else if self.pred_folded(b, t) {
+                key = pred_mask(b, t);
+            } else if t.op == O_VSEL && is_inst(t.a) && key.0 != C_COUNT {
+                let c = b.insts[t.a as usize];
+                if c.op == O_VCMP && c.aux == key.0 && c.a == key.1 && c.b == key.2 {
+                    out.push(t.a);
+                }
+            }
+        }
+    }
+
+    // Whether the instructions that make mask bits `m` (`pred_mask`: extensions and truncations, then a lane
+    // comparison, or the lanes' sum and the AND of a lane mask with their bits) have no other reader than the
+    // next of them, and with `mark`, fold them (`FOLD_PRED`), the AND's constant too when it alone reads it.
+    const fn pred_chain(self: &mut Self, b: &Body, m: Value, mark: bool) bool {
+        let mut x = m;
+        // At most 6 extensions and truncations (`pred_mask`), the comparison or the sum and the AND.
+        for _ in 0..8 {
+            if x != m && self.count[x as usize] != 1 {
+                return false;
+            }
+            if mark {
+                self.pfold[x as usize] = true;
+            }
+            let t = b.insts[x as usize];
+            if t.op == O_AND {
+                if mark && is_inst(t.b) && self.count[t.b as usize] == 1 {
+                    self.pfold[t.b as usize] = true;
+                }
+                return true;
+            }
+            if t.op == O_VOP && (t.aux & VOP_CODE) as u32 != core::OP_SIMD + core::SIMD_REDUCE_ADD as u32 {
+                return true;
+            }
+            x = ast::pick(t.op == O_VOP, b.pool[t.a as usize], t.a);
+        }
+        return false;
     }
 
     // Whether `v` is an equality with 0 of an `and` `FOLD_TST` folds, which this use alone reads: a chain's
@@ -5350,6 +5675,14 @@ extend Live {
         if t.op == O_CALL && l as usize < self.cover.len() && self.cover[l as usize] != NONE {
             return n == 1 && self.seen(b.pool[(t.c + self.cover[l as usize]) as usize]) == v;
         }
+        // BLSR, BLSMSK or BLSI (`FOLD_BLS`) reads its one source, `v` and the folded `v - 1` or `-v`, before
+        // it writes its result.
+        if self.three && (t.op == O_AND || t.op == O_XOR) {
+            let (kind, s, xv) = bls_parts(b, t);
+            if kind != 0 && self.pfold[s as usize] && self.seen(xv) == v {
+                return true;
+            }
+        }
         return n == 1 && self.seen(t.a) == v && over_inst(b, t) || self.three && three_op(t) && (!self.two || n == 1 && self.two_op(
             b,
             l,
@@ -6551,6 +6884,47 @@ pub(package) const fn not_side(b: &Body, folded: &Vector<bool>, t: Inst) Value {
     return ast::pick(is_inst(t.a) && folded[t.a as usize] && inversion(b, t.a) != VNONE, t.a, VNONE);
 }
 
+/// The BMI1 form of `and` or `xor` `t` of `b` (`FOLD_BLS`): the kind (`x64::BLSR` for `x & (x - 1)`,
+/// `x64::BLSMSK` for `x ^ (x - 1)`, `x64::BLSI` for `x & -x`, 0 for none), the operand that is `x - 1` or
+/// `-x`, and `x`, an integer of at most 64 bits that is no folded instruction.
+pub(package) const fn bls_parts(b: &Body, t: Inst) (u8, Value, Value) {
+    if t.op != O_AND && t.op != O_XOR || !is_int(t.ty) || t.ty == T_I128 {
+        return (0, VNONE, VNONE);
+    }
+    let m = if type_bits(t.ty, 8) >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << type_bits(t.ty, 8) as u64) - 1
+    };
+    for side in 0..2 {
+        let (s, x) = if side == 0 {
+            (t.b, t.a)
+        } else {
+            (t.a, t.b)
+        };
+        if !is_inst(s) {
+            continue;
+        }
+        let d = b.insts[s as usize];
+        if d.ty != t.ty {
+            continue;
+        }
+        // `x - 1` as `x + -1` or `x - 1`; `-x` as `neg x` or `0 - x`.
+        let dec = d.a == x && (d.op == O_ADD && is_const_val(b, d.b) && (const_val(b, d.b) & m) == m || d.op == O_SUB && is_const_val(
+            b,
+            d.b,
+        ) && (const_val(b, d.b) & m) == 1);
+        let neg = d.op == O_NEG && d.a == x || d.op == O_SUB && d.b == x && is_const_val(b, d.a) && (const_val(b, d.a) & m) == 0;
+        if dec {
+            return (ast::pick(t.op == O_AND, 1u8, 2u8), s, x);
+        }
+        if neg && t.op == O_AND {
+            return (3, s, x);
+        }
+    }
+    return (0, VNONE, VNONE);
+}
+
 /// The load store `t` of `b` reads, modifies and writes back (`FOLD_RMW`): its value an integer `add`, `sub`,
 /// `and`, `or` or `xor`, not folded, of a load (its first operand for a `sub`) of the store's address and
 /// offset, of the operation's type, neither volatile nor bounded, nor folded; the other operand no folded
@@ -6650,6 +7024,15 @@ pub(package) const fn cs_kind(b: &Body, v: Value, other: Value) u8 {
     }
     let (k, x) = cs_base(b, v);
     return ast::pick(x == other, k, CS_NONE);
+}
+
+/// Whether `v` is a load of an integer of 8, 16 or 32 bits.
+const fn narrow_load(b: &Body, v: Value) bool {
+    if !is_inst(v) {
+        return false;
+    }
+    let t = b.insts[v as usize];
+    return t.op == O_LOAD && (t.ty == T_I8 || t.ty == T_I16 || t.ty == T_I32);
 }
 
 /// Whether `v` is `y - x` and `other` is `x - y`, of one integer type: `v` negates `other`.
@@ -6788,12 +7171,12 @@ pub(package) const fn over_op(t: Inst) bool {
     return step_op(t) || !is_vec(t.ty) && (t.op == O_ADDO || t.op == O_SUBO);
 }
 
-/// `over_op`, a pointer plus a constant (a pointer's step), a widening sum over its accumulator (`O_VSUMW`,
-/// which reads its other operand into a temporary first), or a conversion between integers or pointers of
+/// `over_op`, a pointer plus a constant (a pointer's step), a widening sum or dot product over its accumulator
+/// (`O_VSUMW`, `O_VDOT`, which read their other operands into temporaries first), or a conversion between integers or pointers of
 /// at most 64 bits (an extension, a truncation, a cast), which the generators make from their operand's
 /// register in one instruction or none.
 pub(package) const fn over_inst(b: &Body, t: Inst) bool {
-    if over_op(t) || t.op == O_PTRADD && t.b == VNONE || t.op == O_VSUMW {
+    if over_op(t) || t.op == O_PTRADD && t.b == VNONE || t.op == O_VSUMW || t.op == O_VDOT {
         return true;
     }
     if t.op != O_ZEXT && t.op != O_SEXT && t.op != O_TRUNC && t.op != O_PTRTOINT && t.op != O_INTTOPTR || t.a == VNONE {
@@ -6806,12 +7189,12 @@ pub(package) const fn over_inst(b: &Body, t: Inst) bool {
 /// Whether a generator that reads every operand before it writes (`Live::three`) emits instruction `t` so:
 /// an integer or float operation, a comparison, a conversion, a pointer sum, a load, a select,
 /// a lanewise vector operation, comparison or select, a splat, a bit count or reversal, a high product, a
-/// fused product and sum, a square root, a widening sum.
+/// fused product and sum, a square root, a widening sum, a dot product.
 pub(package) const fn three_op(t: Inst) bool {
     let o = t.op;
     let scalar = o >= O_ADD && o <= O_FNEG || o >= O_SEXT && o <= O_INTTOPTR || o == O_PTRADD || o == O_LOAD || o == O_SELECT;
     let bits = o >= O_CLZ && o <= O_POPCNT || o == O_BSWAP || o == O_BITREV || o == O_MULHU || o == O_MULHS;
-    return scalar || bits || o == O_VOP || o == O_FMA || o == O_FSQRT || o == O_SPLAT || o == O_VCMP || o == O_VSEL || o == O_VSUMW;
+    return scalar || bits || o == O_VOP || o == O_FMA || o == O_FSQRT || o == O_SPLAT || o == O_VCMP || o == O_VSEL || o == O_VSUMW || o == O_VDOT;
 }
 
 /// For select `t` whose condition is a comparison or a flag (0 or 1, which a sum may add), the side that is
@@ -7341,26 +7724,6 @@ pub(package) fn dead_end(p: &Package, b: &Body, lv: &Live, i: usize, uses: &mut 
             if !remat_inst(p, b, uses[u]) {
                 return false;
             }
-        }
-    }
-    return true;
-}
-
-// Whether `v` is a vector of zeros: a splat of 0 or a wide constant of zero words.
-const fn zero_vec(b: &Body, v: Value) bool {
-    if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
-        return false;
-    }
-    let t = b.insts[v as usize];
-    if t.op == O_SPLAT {
-        return int_const(b, t.a) == 0;
-    }
-    if t.op != O_WCONST {
-        return false;
-    }
-    for k in t.a..t.a + t.b {
-        if b.words[k as usize] != 0 {
-            return false;
         }
     }
     return true;

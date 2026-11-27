@@ -164,6 +164,16 @@ fn unproved_contracts_are_errors() {
         "cannot prove this 'ensures' clause",
     );
     b.add(
+        "a lemma over a function that writes through a `&mut` argument",
+        "const fn set7(x: &mut u32) {\n    *x = 7;\n}\nconst fn f(v: u32) u32 {\n    let mut r = v;\n    set7(&mut r);\n    return r;\n}\nlemma kept(v: u32) ensures f(v) == v {}\nfn main() i32 { return f(1) as i32; }\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
+        "an ensures that compares with a wrong option",
+        "fn f(v: u64) Option<u64> ensures |r| r == Some(v) { return Some(v ^ 1); }\nfn main() i32 { return f(1).is_some() as i32; }\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
         "a loop measure that grows",
         "fn f(n: u32) u32 {\n    let mut k = n;\n    while k < 100 decreases k { k += 1; }\n    return k;\n}\nfn main() i32 { return f(1) as i32; }\n",
         "cannot prove that this 'decreases' measure decreases in each iteration",
@@ -263,6 +273,16 @@ fn unproved_contracts_are_errors() {
         "a wrapping sum past the maximum",
         "fn f(x: u32) u32 ensures |r| r > x { return x.wrapping_add(1); }\nfn main() i32 { return f(1) as i32 - 2; }\n",
         "for example: x = 4294967295",
+    );
+    b.add(
+        "wrapping sums of other terms",
+        "lemma l(a: u64, b: u64, c: u64) ensures a.wrapping_add(b).wrapping_add(c) == a.wrapping_add(b.wrapping_add(b)) {}\nfn main() i32 { return 0; }\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
+        "wrapping sums of other constants",
+        "lemma l(a: u64, b: u64) ensures a.wrapping_add(3).wrapping_add(b) == b.wrapping_add(a.wrapping_add(4)) {}\nfn main() i32 { return 0; }\n",
+        "cannot prove this 'ensures' clause",
     );
     b.add(
         "a rotation the other rotation does not undo",
@@ -400,6 +420,105 @@ fn unproved_contracts_are_errors() {
         "cannot prove this 'ensures' clause",
     );
     b.add(
+        "a call past an interface spec function's default body",
+        "interface Sized {\n    spec fn cap() u32;\n    spec fn fits(x: u32) bool {\n        return x < Self::cap();\n    }\n    fn put(self: &Self, x: u32) u32\n        requires Self::fits(x);\n}\nstruct Small {}\nextend Small as Sized {\n    spec fn cap() u32 {\n        return 4;\n    }\n    fn put(self: &Small, x: u32) u32\n        requires Self::fits(x)\n    {\n        return x;\n    }\n}\nstruct Wide {}\nextend Wide as Sized {\n    spec fn cap() u32 {\n        return 100;\n    }\n    spec fn fits(x: u32) bool {\n        return x <= Self::cap();\n    }\n    fn put(self: &Wide, x: u32) u32\n        requires Self::fits(x)\n    {\n        return x;\n    }\n}\nfn main() i32 {\n    return Small {}.put(4) as i32;\n}\n",
+        "cannot prove the 'requires' of 'put' at this call",
+    );
+    b.add(
+        "a call past an interface spec function's override",
+        "interface Sized {\n    spec fn cap() u32;\n    spec fn fits(x: u32) bool {\n        return x < Self::cap();\n    }\n    fn put(self: &Self, x: u32) u32\n        requires Self::fits(x);\n}\nstruct Small {}\nextend Small as Sized {\n    spec fn cap() u32 {\n        return 4;\n    }\n    fn put(self: &Small, x: u32) u32\n        requires Self::fits(x)\n    {\n        return x;\n    }\n}\nstruct Wide {}\nextend Wide as Sized {\n    spec fn cap() u32 {\n        return 100;\n    }\n    spec fn fits(x: u32) bool {\n        return x <= Self::cap();\n    }\n    fn put(self: &Wide, x: u32) u32\n        requires Self::fits(x)\n    {\n        return x;\n    }\n}\nfn main() i32 {\n    return Wide {}.put(101) as i32;\n}\n",
+        "cannot prove the 'requires' of 'put' at this call",
+    );
+    b.add(
+        "a carry claimed of a borrow",
+        "fn add_carry(a: u64, b: u64, c: *mut u64) u64\n    requires c != null\n    ensures |r| (unsafe *c) as int * 18446744073709551616 + r as int == a as int + b as int\n{\n    let s = a.wrapping_add(b);\n    unsafe *c = (a < b) as u64;\n    return s;\n}\nfn main() i32 { return 0; }\n",
+        "cannot prove this 'ensures' clause",
+    );
+    // A false claim of the portable 64 by 64 bit product: its facts prove it false within a few steps, not
+    // the step budget.
+    b.add(
+        "a false claim of a product of halves",
+        M"(fn mul_wide(a: u64, b: u64, hi: *mut u64) u64
+    requires hi != null
+    ensures |r| (unsafe *hi) as int * 18446744073709551616 + r as int == a as int * b as int + 1
+{
+    let a0 = a & 0xFFFFFFFFu64;
+    let a1 = a >> 32;
+    let b0 = b & 0xFFFFFFFFu64;
+    let b1 = b >> 32;
+    let p00 = a0 * b0;
+    let p01 = a0 * b1;
+    let p10 = a1 * b0;
+    let p11 = a1 * b1;
+    let mid = (p00 >> 32) + (p01 & 0xFFFFFFFFu64) + (p10 & 0xFFFFFFFFu64);
+    unsafe *hi = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32);
+    return p00 & 0xFFFFFFFFu64 | mid << 32;
+}
+fn main() i32 {
+    let mut h: u64 = 0;
+    return mul_wide(3, 5, &mut h) as i32;
+}
+)",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
+        "a sequence the path makes of another element",
+        M"(import std::spec::seq as *;
+
+fn app(v: &mut Vector<u8>, x: u8, y: u8)
+    requires v.view().len() < 1000
+    ensures v.view() == old(v.view()).push(x)
+{
+    v.push(y);
+}
+
+fn main() i32 {
+    return 0;
+}
+)",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
+        "a predicate of another operand",
+        M"(fn need(p: *mut u8, n: usize) bool
+    requires p == null || Global::owns(p, n, 1)
+{
+    return true;
+}
+
+fn f(p: *mut u8, n: usize, m: usize) bool
+    requires Global::owns(p, m, 1) && n as int == m as int + 1
+{
+    return need(p, n);
+}
+
+fn main() i32 {
+    return 0;
+}
+)",
+        "cannot prove the 'requires' of 'need' at this call",
+    );
+    b.add(
+        "a mask's bound of one operand",
+        M"(fn f(x: u64, y: u64, ux: u64, uy: u64) u64
+    requires x <= ux && y <= uy && ux <= 0xFF && uy <= 0xFF
+    ensures |r| r <= ux
+{
+    return x.wrapping_add(y) & 0xFF;
+}
+
+fn main() i32 {
+    return 0;
+}
+)",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
+        "a byte past a memset",
+        "import std::spec::seq as *;\nimport string;\nstruct B {\n    @owned\n    p: *mut u8,\n    cap: usize,\n}\nfn bad(b: &mut B) requires block(b.p).len() >= 8 ensures block(b.p)[4] == 9 {\n    unsafe string::memset(b.p, 9, 4);\n}\nfn main() i32 { return 0; }\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
         "a const fn over constants that panics there",
         "const fn bad(x: u32) u32 {\n    if x == 0 {\n        panic(\"zero\");\n    }\n    return 1;\n}\nfn g() u32 requires bad(0) == 2 ensures |r| r == 0 {\n    return 1;\n}\nfn main() i32 { return 0; }\n",
         "cannot prove this 'ensures' clause",
@@ -458,6 +577,26 @@ fn unproved_ghost_code_is_an_error() {
         "a static whose first value breaks its invariant",
         "static mut H: u32 = 3\n    invariant H > 1, H > 5;\n",
         "cannot prove the invariant of this static's first value",
+    );
+    b.add(
+        "a const fn read where it overflows",
+        "const fn double(x: u32) u32 {\n    return x * 2;\n}\nlemma l(x: u32) ensures double(x) >= x {}\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
+        "a const fn read where its index is out of bounds",
+        "const fn at(a: [u32; 4], i: usize) u32 {\n    return a[i];\n}\nlemma l(i: usize) ensures at([1, 2, 3, 4], i) >= 1 {}\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
+        "a const fn with a loop",
+        "const fn spin(x: u32) u32 {\n    let mut y = x;\n    while y != 7 { y = y + 1; }\n    return y;\n}\nlemma l(x: u32) ensures spin(x) == 7 {}\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
+        "a const fn that recurses without a measure",
+        "const fn r(x: u32) bool {\n    if x == 0 {\n        return true;\n    }\n    return !r(x);\n}\nlemma l(x: u32) ensures r(x) {}\n",
+        "cannot prove this 'ensures' clause",
     );
     b.add(
         "the ensures of a callee that may not end",
@@ -556,9 +695,19 @@ fn spec_syntax_is_checked() {
         "an extern function with contracts must be '@trusted': no proof checks them",
     );
     h::expect_err_msg(
-        "@trusted on a function with a body",
+        "@trusted on a function with a body and no contract",
         "@trusted\nfn t(a: u32) u32 { return a; }\nfn main() i32 { return 0; }\n",
-        "'@trusted' marks a spec function or a lemma without a body",
+        "'@trusted' marks a spec function or a lemma without a body, or a function or an extern function with contracts",
+    );
+    // A function whose body no proof follows (a processor instruction's meaning) states it as `@trusted`
+    // contracts: callers assume its `ensures`, which no proof checks; without `@trusted` the proof fails.
+    let body = "fn three(a: u32) u32\n    ensures |r| r == 3\n{\n    return a;\n}\n";
+    let main = "fn main() i32 {\n    let x = three(3);\n    assert x == 3 by {};\n    return x as i32;\n}\n";
+    h::expect_exit("a trusted function's ensures", format("@trusted\n{}{}", body, main).as_str(), 3);
+    h::expect_build_err(
+        "the same ensures unproved",
+        format("{}{}", body, main).as_str(),
+        "cannot prove this 'ensures' clause",
     );
 }
 
@@ -762,6 +911,46 @@ fn bad(p: *mut void) {
 )",
         "cannot prove the 'requires' of 'hand' at this call",
         "14:5",
+    );
+    b.add_at(
+        "an entry for any argument whose requires names its argument",
+        M"(fn hand(entry: fn(*mut void) void)
+    requires pre_any(entry)
+{
+}
+
+fn job(env: *mut void)
+    requires env != null
+{
+    unsafe *(env as *mut u64) = 1;
+}
+
+fn bad() {
+    hand(job);
+}
+)",
+        "cannot prove the 'requires' of 'hand' at this call",
+        "13:5",
+    );
+    b.add_at(
+        "a write through another pointer while a struct's invariant is broken",
+        M"(struct S
+    invariant self.lo <= self.hi
+{
+    lo: u32,
+    hi: u32,
+}
+
+fn bad(p: *mut S, q: *mut u32)
+    requires p != null
+{
+    unsafe (*p).lo = 30;
+    unsafe *q = 1;
+    unsafe (*p).hi = 40;
+}
+)",
+        "cannot prove the invariant of 'S' after the writes through a pointer",
+        "12:5",
     );
     b.add_at(
         "a free of a block handed over",
@@ -1025,6 +1214,273 @@ fn unproved_spec_syntax_is_an_error() {
 }
 
 fn proved_contracts(b: &mut h::ExitBatch) {
+    // An interface's spec function with a default body: a conformance that defines none takes it, with
+    // its `Self` the conformance's type; one that defines it overrides it.
+    b.add(
+        "an interface spec function's default body and an override",
+        M"(interface Sized {
+    spec fn cap() u32;
+    spec fn fits(x: u32) bool {
+        return x < Self::cap();
+    }
+    fn put(self: &Self, x: u32) u32
+        requires Self::fits(x);
+}
+struct Small {}
+extend Small as Sized {
+    spec fn cap() u32 {
+        return 4;
+    }
+    fn put(self: &Small, x: u32) u32
+        requires Self::fits(x)
+    {
+        return x;
+    }
+}
+struct Wide {}
+extend Wide as Sized {
+    spec fn cap() u32 {
+        return 100;
+    }
+    spec fn fits(x: u32) bool {
+        return x <= Self::cap();
+    }
+    fn put(self: &Wide, x: u32) u32
+        requires Self::fits(x)
+    {
+        return x;
+    }
+}
+fn main(args: Vector<str>) i32 {
+    let k = args.len() as u32;
+    let mut r = Small {}.put(3) + Wide {}.put(100);
+    if k < 4 {
+        r += Small {}.put(k);
+    }
+    return r as i32;
+}
+)",
+        104,
+    );
+    // Ghost code reads a `const fn` that ends as its body: a law over the program's own functions, a
+    // recursion under `decreases` by induction, an operation where it fits; a lemma call gives real code
+    // the law.
+    b.add(
+        "lemmas over const fns read their bodies",
+        M"(const fn clamp(x: u32, hi: u32) u32 {
+    if x > hi {
+        return hi;
+    }
+    return x;
+}
+const fn double(x: u32) u32 {
+    return x * 2;
+}
+const fn sum_to(n: u32) u64
+    requires n <= 1000
+    ensures |r| r <= n as u64 * 1000
+    decreases n
+{
+    if n == 0 {
+        return 0;
+    }
+    return n as u64 + sum_to(n - 1);
+}
+lemma clamp_le(x: u32, hi: u32)
+    ensures clamp(x, hi) <= hi
+{}
+lemma double_even(x: u32)
+    requires x < 1000
+    ensures double(x) % 2 == 0
+{}
+lemma sum_ge(n: u32)
+    requires n <= 1000
+    ensures sum_to(n) >= n as u64
+{}
+fn main(args: Vector<str>) i32 {
+    let k = args.len() as u32;
+    let c = clamp(k + 40, 7);
+    clamp_le(k + 40, 7);
+    let a: [u32; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
+    sum_ge(4);
+    return (a[c as usize] + double(3) + sum_to(4) as u32) as i32;
+}
+)",
+        23,
+    );
+    // A literal of a generic struct with an array member is the value of its elements, and a narrowing cast
+    // inside a function without clauses keeps every value in its definition: a round trip proves both ways.
+    b.add(
+        "lemmas over generic struct values and narrowing casts",
+        M"(struct Pair<T, const N: usize> {
+    e: [T; N],
+}
+const fn pack(v: Pair<i16, 2>) i32 {
+    return ((v.e[0] as u16) as u32 | (v.e[1] as u16) as u32 << 16) as i32;
+}
+const fn unpack(p: i32) Pair<i16, 2> {
+    return Pair::<i16, 2> { e: [p as i16, (p as u32 >> 16) as i16] };
+}
+lemma round_trip(v: Pair<i16, 2>, p: i32)
+    ensures unpack(pack(v)).e == v.e
+    ensures pack(unpack(p)) == p
+{}
+fn main(args: Vector<str>) i32 {
+    let v = Pair::<i16, 2> { e: [-3, args.len() as i16 + 30] };
+    return unpack(pack(v)).e[1];
+}
+)",
+        31,
+    );
+    // A spec function's or a lemma's body never runs: a value of a type parameter is read there as often as
+    // the proof needs, as in a clause.
+    b.add(
+        "a lemma reads a value of a type parameter twice",
+        M"(import std::spec::seq as *;
+
+lemma pushed_twice<T>(s: Seq<T>, x: T)
+    ensures s.push(x).len() == s.len() + 1
+{
+    ghost let a = s.push(x);
+    ghost let b = s.push(x);
+    assert a == b by {};
+}
+fn main(args: Vector<str>) i32 {
+    return args.len() as i32 + 4;
+}
+)",
+        5,
+    );
+    // In ghost code a call through a built-in type reaches its conformance, a blanket `extend<T: Int> T` too,
+    // and the generic body's operators and `T::one()` reach the built-in's `const fn` conformances.
+    b.add(
+        "lemmas through blanket conformances of built-in types",
+        M"(import std::math::scalar as *;
+import std::math::vec as *;
+
+pub interface Dec: Elem {
+    fn dec(x: Self) Self;
+    fn three(x: Self) Vec<Self, 3>;
+}
+extend<T: Int> T as Dec {
+    pub const fn dec(x: T) T {
+        return x - T::one();
+    }
+    pub const fn three(x: T) Vec<T, 3> {
+        return Vec::<T, 3>::new(x, x, x);
+    }
+}
+lemma dec_i16(a: i16)
+    requires a > 0
+    ensures i16::dec(a) == a - 1
+{}
+lemma three_u32(a: u32)
+    ensures u32::three(a).e[2] == a
+{}
+fn main(args: Vector<str>) i32 {
+    return i32::dec(args.len() as i32 + 6);
+}
+)",
+        6,
+    );
+    // Ghost code unfolds a `const fn` with a loop by running the loop, and a call that writes through a
+    // `&mut` argument (an automatic one too) gives its referent the value the callee leaves.
+    b.add(
+        "lemmas over loops and writes through `&mut` arguments",
+        M"(const fn set_low(x: &mut u32, v: u32) {
+    if *x > 10 {
+        *x = *x - 10;
+    }
+    *x = *x & ~0xFu32 | v & 0xF;
+}
+const fn twice(v: u32) u32 {
+    let mut r = v;
+    for _i in 0..2 {
+        set_low(&mut r, 3);
+    }
+    return r;
+}
+struct C { n: u32 }
+extend C {
+    const fn bump(self: &mut C) {
+        self.n = self.n + 1;
+    }
+}
+const fn bumped(n: u32) u32 {
+    let mut c = C { n: n };
+    c.bump();
+    c.bump();
+    return c.n;
+}
+lemma twice_small(v: u32)
+    requires v <= 10
+    ensures twice(v) == (v & ~0xFu32 | 3)
+{}
+lemma bumped_adds(n: u32)
+    requires n < 100
+    ensures bumped(n) == n + 2
+{}
+fn main(args: Vector<str>) i32 {
+    return twice(args.len() as u32) as i32 + bumped(1) as i32;
+}
+)",
+        6,
+    );
+    // A clause's `==` through an `Eq` conformance is that conformance's body: `Option`'s, then the payload's.
+    b.add(
+        "clauses that compare through Eq conformances",
+        M"(struct P { a: u32, b: i16 }
+extend P as Eq {
+    pub const fn eq(self: &P, other: &P) bool {
+        return self.a == other.a && self.b == other.b;
+    }
+}
+fn pick(v: u64) Option<u64>
+    ensures |r| (r == Option::<u64>::None) == (v != 0)
+    ensures |r| v != 0 || r == Some(v)
+{
+    if v != 0 {
+        return None;
+    }
+    return Some(v);
+}
+fn point(v: u32) Option<P>
+    ensures |r| r == Some(P { a: v, b: -1 })
+{
+    return Some(P { a: v, b: -1 });
+}
+fn main(args: Vector<str>) i32 {
+    return pick(args.len() as u64 - 1).is_some() as i32 + point(3).is_some() as i32 + 5;
+}
+)",
+        7,
+    );
+    // `count_ones` is the sum of the bits, and a complement's count the width less the count; a remainder by
+    // an unknown divisor has the dividend's sign and lies strictly inside the divisor's magnitude.
+    b.add(
+        "bit counts and remainders by unknown divisors",
+        M"(fn bits(x: u64) usize
+    ensures |r| r <= 64
+{
+    return x.count_ones();
+}
+fn rem_in(x: i32, d: i32) i32
+    requires d != 0 && !(x == i32::MIN && d == -1)
+    ensures |r| d > 0 ==> r < d && r as i64 > -(d as i64)
+    ensures |r| d < 0 ==> r > d && (r as i64) < -(d as i64)
+    ensures |r| x >= 0 ==> r >= 0
+{
+    return x % d;
+}
+lemma ones_split(x: u32)
+    ensures x.count_zeros() + x.count_ones() == 32
+{}
+fn main(args: Vector<str>) i32 {
+    return bits(0xFF) as i32 + rem_in(-7, 3) + args.len() as i32 - 1;
+}
+)",
+        7,
+    );
     // Twenty branches in a row make 2^20 paths: the walk that merges them at each join proves the call's
     // `requires` past the exact walk's budget.
     b.add(
@@ -1846,6 +2302,10 @@ fn negated(x: i64) i64
 {
     return x.wrapping_neg();
 }
+lemma regrouped(a: u64, b: u64, c: u64, d: u64)
+    ensures a.wrapping_add(b).wrapping_add(c).wrapping_add(d) == d.wrapping_add(c.wrapping_add(b).wrapping_add(a))
+    ensures a.wrapping_add(3).wrapping_add(b).wrapping_add(4) == b.wrapping_add(a.wrapping_add(7))
+{}
 fn main() i32 {
     let q = quarter(1, 2, 3);
     return (wrap_back(7, 4294967295) + rot_back(2, 33) + odd_times(5) % 2 + (q >> 16 ^ 3)) as i32 + signed_rot(-2) + negated(5) as i32 + 5;
@@ -2299,6 +2759,407 @@ fn main() i32 {
 }
 )",
         4,
+    );
+    // Bit splits, products of split values, wrapping arithmetic and boolean casts: the portable 64 by 64 bit
+    // product, an addition with its carry, a subtraction with its borrow, a wrapping product's low half.
+    b.add(
+        "a wide product from its halves, and carries",
+        M"(fn mul_wide(a: u64, b: u64, hi: *mut u64) u64
+    requires hi != null
+    ensures |r| (unsafe *hi) as int * 18446744073709551616 + r as int == a as int * b as int
+{
+    let a0 = a & 0xFFFFFFFFu64;
+    let a1 = a >> 32;
+    let b0 = b & 0xFFFFFFFFu64;
+    let b1 = b >> 32;
+    let p00 = a0 * b0;
+    let p01 = a0 * b1;
+    let p10 = a1 * b0;
+    let p11 = a1 * b1;
+    let mid = (p00 >> 32) + (p01 & 0xFFFFFFFFu64) + (p10 & 0xFFFFFFFFu64);
+    unsafe *hi = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32);
+    return p00 & 0xFFFFFFFFu64 | mid << 32;
+}
+
+fn add_carry(a: u64, b: u64, c: *mut u64) u64
+    requires c != null
+    ensures |r| (unsafe *c) as int * 18446744073709551616 + r as int == a as int + b as int
+{
+    let s = a.wrapping_add(b);
+    unsafe *c = (s < a) as u64;
+    return s;
+}
+
+fn sub_borrow(a: u64, b: u64, c: *mut u64) u64
+    requires c != null
+    ensures |r| r as int - (unsafe *c) as int * 18446744073709551616 == a as int - b as int
+{
+    let s = a.wrapping_sub(b);
+    unsafe *c = (a < b) as u64;
+    return s;
+}
+
+fn low(a: u64, b: u64) u64
+    ensures |r| r as int == a as int * b as int % 18446744073709551616
+{
+    return a.wrapping_mul(b);
+}
+
+fn join(x: u64, y: u64) u64
+    requires y < 0x100000000
+    ensures |r| r as int == (x >> 32) as int + y as int * 4294967296
+{
+    return x >> 32 ^ y << 32;
+}
+
+fn main() i32 {
+    let mut h: u64 = 0;
+    let l = mul_wide(0xFFFFFFFFFFFFFFFF, 3, &mut h);
+    let mut c: u64 = 0;
+    let s = add_carry(0xFFFFFFFFFFFFFFFF, 2, &mut c);
+    let mut d: u64 = 0;
+    let t = sub_borrow(1, 2, &mut d);
+    let ok = h == 2 && l == 0xFFFFFFFFFFFFFFFD && c == 1 && s == 1 && d == 1 && t == 0xFFFFFFFFFFFFFFFF;
+    let ok2 = low(0x100000001, 0x100000001) == 0x200000001 && join(0x500000000, 2) == 0x200000005;
+    return if ok && ok2 {
+        6
+    } else {
+        1
+    };
+}
+)",
+        6,
+    );
+    // Moller and Granlund's 2-by-1 division by the divisor's reciprocal: the estimate's remainder bounds,
+    // the remainder word modulo 2^64, and the two corrections, each step a lemma of few facts.
+    b.add(
+        "a 128 by 64 bit division by a reciprocal",
+        M"(spec fn bb() int {
+    return 18446744073709551616;
+}
+
+lemma mul_eq(x: int, y: int, z: int)
+    requires x == y
+    ensures x * z == y * z
+{}
+
+lemma mul_le(a: int, b: int, c: int, e: int)
+    requires 0 <= a && a <= c && 0 <= b && b <= e
+    ensures a * b <= c * e
+{}
+
+// The estimate's remainder `rt = u1 * 2^64 + u0 - (qq + 1) * d` times 2^64, by the reciprocal's defect
+// `k = 2^128 - (2^64 + v) * d`, where `qq * 2^64 + s0 == (2^64 + v) * u1 + u0`.
+lemma identity(u1: int, u0: int, d: int, v: int, qq: int, s0: int)
+    requires qq * bb() + s0 == (bb() + v) * u1 + u0
+    ensures bb() * (u1 * bb() + u0 - (qq + 1) * d) == u1 * (bb() * bb() - (bb() + v) * d) + u0 * (bb() - d) + s0 * d - bb() * d
+{
+    mul_eq(qq * bb() + s0, (bb() + v) * u1 + u0, d);
+}
+
+// The estimate fits a word.
+lemma est_q(u1: int, u0: int, d: int, v: int, qq: int, s0: int)
+    requires 0 <= u1 && u1 < d && 0 <= u0 && u0 < bb() && 0 <= s0 && s0 < bb() && 0 <= v
+    requires (bb() + v) * d <= bb() * bb() - 1
+    requires qq * bb() + s0 == (bb() + v) * u1 + u0
+    ensures qq < bb()
+{
+    mul_le(u1, bb() + v, d - 1, bb() + v);
+}
+
+// The estimate's remainder is above `s0 - 2^64` and at least `-d`.
+lemma est_lo(u1: int, u0: int, d: int, v: int, qq: int, s0: int)
+    requires bb() / 2 <= d && d < bb() && 0 <= u1 && u1 < d && 0 <= u0 && u0 < bb() && 0 <= s0 && s0 < bb()
+    requires (bb() + v) * d <= bb() * bb() - 1
+    requires qq * bb() + s0 == (bb() + v) * u1 + u0
+    ensures u1 * bb() + u0 - (qq + 1) * d > s0 - bb() && u1 * bb() + u0 - (qq + 1) * d >= 0 - d
+{
+    identity(u1, u0, d, v, qq, s0);
+    mul_le(0, 0, u1, bb() * bb() - (bb() + v) * d);
+    mul_le(0, 0, u0, bb() - d);
+    mul_le(1, 1, bb() - s0, bb() - d);
+}
+
+// The estimate's remainder is below `s0` or below `2^64 - d`.
+lemma est_hi(u1: int, u0: int, d: int, v: int, qq: int, s0: int)
+    requires bb() / 2 <= d && d < bb() && 0 <= u1 && u1 < d && 0 <= u0 && u0 < bb() && 0 <= s0 && s0 < bb()
+    requires (bb() + v) * d <= bb() * bb() - 1 && bb() * bb() - 1 < (bb() + v + 1) * d
+    requires qq * bb() + s0 == (bb() + v) * u1 + u0
+    ensures u1 * bb() + u0 - (qq + 1) * d < s0 || u1 * bb() + u0 - (qq + 1) * d < bb() - d
+{
+    identity(u1, u0, d, v, qq, s0);
+    mul_le(u1, bb() * bb() - (bb() + v) * d, d - 1, d);
+    mul_le(u0, bb() - d, bb() - 1, bb() - d);
+    if s0 >= bb() - d {
+        mul_le(bb() - d, bb() - d, bb() - d, s0);
+    } else {
+        mul_le(s0, d, bb() - d, d);
+    }
+}
+
+// An estimate of 2^64 leaves a negative remainder: the dividend is below `d * 2^64`.
+lemma top(u1: int, u0: int, d: int, qq: int)
+    requires 0 <= u1 && u1 < d && 0 <= u0 && u0 < bb()
+    ensures qq + 1 == bb() ==> u1 * bb() + u0 - (qq + 1) * d < 0
+{}
+
+// The first correction taken (the remainder word above `s0`): the estimate less one, its remainder plus d.
+lemma taken(rt: int, r0: int, rn: int, qn: int, qq: int, s0: int, d: int)
+    requires 0 <= r0 && r0 < bb() && 0 <= rn && rn < bb() && 0 <= qn && qn < bb() && 0 <= qq && qq < bb()
+    requires bb() / 2 <= d && d < bb() && 0 <= s0 && s0 < bb() && r0 > s0
+    requires rt > s0 - bb() && rt >= 0 - d && (rt < s0 || rt < bb() - d)
+    requires (r0 - rt) % bb() == 0 && (rn - rt - d) % bb() == 0 && (qn - qq) % bb() == 0
+    ensures qn == qq && rn == rt + d && rn < 2 * d
+{}
+
+// The first correction not taken: the estimate and its remainder.
+lemma kept(rt: int, r0: int, q0: int, qq: int, s0: int, d: int)
+    requires 0 <= r0 && r0 < bb() && 0 <= q0 && q0 < bb() && 0 <= qq && qq < bb()
+    requires bb() / 2 <= d && d < bb() && 0 <= s0 && s0 < bb() && r0 <= s0
+    requires rt > s0 - bb() && (rt < s0 || rt < bb() - d) && (qq + 1 == bb() ==> rt < 0)
+    requires (r0 - rt) % bb() == 0 && (q0 - qq - 1) % bb() == 0
+    ensures q0 == qq + 1 && r0 == rt && r0 < 2 * d
+{}
+
+// A quotient whose remainder is at least the divisor is below the most a word holds, less one.
+lemma no_carry(q: int, r: int, d: int, n: int)
+    requires q * d + r == n && n < d * bb() && r >= d && 0 <= q && 0 < d
+    ensures q + 1 < bb()
+{
+    if q + 1 >= bb() {
+        mul_le(bb(), d, q + 1, d);
+    }
+}
+
+fn mul_wide(a: u64, b: u64, hi: *mut u64) u64
+    requires hi != null
+    ensures |r| (unsafe *hi) as int * 18446744073709551616 + r as int == a as int * b as int
+{
+    let a0 = a & 0xFFFFFFFFu64;
+    let a1 = a >> 32;
+    let b0 = b & 0xFFFFFFFFu64;
+    let b1 = b >> 32;
+    let p00 = a0 * b0;
+    let p01 = a0 * b1;
+    let p10 = a1 * b0;
+    let p11 = a1 * b1;
+    let mid = (p00 >> 32) + (p01 & 0xFFFFFFFFu64) + (p10 & 0xFFFFFFFFu64);
+    unsafe *hi = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32);
+    return p00 & 0xFFFFFFFFu64 | mid << 32;
+}
+
+fn div2by1_pre(u1: u64, u0: u64, d: u64, v: u64, r: *mut u64) u64
+    requires r != null && d >= 0x8000000000000000 && u1 < d
+    requires (18446744073709551616 + v as int) * d as int <= 340282366920938463463374607431768211455
+    requires 340282366920938463463374607431768211455 < (18446744073709551617 + v as int) * d as int
+    ensures |q| q as int * d as int + (unsafe *r) as int == u1 as int * 18446744073709551616 + u0 as int
+    ensures (unsafe *r) < d
+{
+    let mut q1: u64 = 0;
+    let q0 = mul_wide(v, u1, &mut q1);
+    ghost let h = q1 as int;
+    let s0 = q0.wrapping_add(u0);
+    let c1 = (s0 < q0) as u64;
+    q1 = q1.wrapping_add(u1).wrapping_add(c1).wrapping_add(1);
+    ghost let qq = h + u1 as int + c1 as int;
+    ghost let rt = u1 as int * bb() + u0 as int - (qq + 1) * d as int;
+    est_q(u1 as int, u0 as int, d as int, v as int, qq, s0 as int);
+    est_lo(u1 as int, u0 as int, d as int, v as int, qq, s0 as int);
+    est_hi(u1 as int, u0 as int, d as int, v as int, qq, s0 as int);
+    top(u1 as int, u0 as int, d as int, qq);
+    let mut rem = u0.wrapping_sub(q1.wrapping_mul(d));
+    ghost let r0 = rem as int;
+    assert (r0 - rt) % bb() == 0 by {};
+    assert (q1 as int - qq - 1) % bb() == 0 by {};
+    if rem > s0 {
+        q1 = q1.wrapping_sub(1);
+        rem = rem.wrapping_add(d);
+        assert (rem as int - rt - d as int) % bb() == 0 && (q1 as int - qq) % bb() == 0 by {};
+        taken(rt, r0, rem as int, q1 as int, qq, s0 as int, d as int);
+    } else {
+        kept(rt, r0, q1 as int, qq, s0 as int, d as int);
+    }
+    if rem >= d {
+        no_carry(q1 as int, rem as int, d as int, u1 as int * bb() + u0 as int);
+        q1 = q1 + 1;
+        rem = rem - d;
+    }
+    unsafe *r = rem;
+    return q1;
+}
+
+fn main() i32 {
+    let mut r1: u64 = 0;
+    let q1 = div2by1_pre(5, 7, 0x8000000000000000, 0xFFFFFFFFFFFFFFFF, &mut r1);
+    let mut r2: u64 = 0;
+    let q2 = div2by1_pre(3, 5, 0xFFFFFFFFFFFFFFFF, 1, &mut r2);
+    return (q1 + r1 + q2 + r2) as i32;
+}
+)",
+        28,
+    );
+    b.add(
+        "wrapping chains modulo 2^64",
+        M"(fn w3(h: u64, u: u64, c: u64) u64
+    ensures |r| r as int == (h as int + u as int + c as int + 1) % 18446744073709551616
+{
+    return h.wrapping_add(u).wrapping_add(c).wrapping_add(1);
+}
+
+fn rem_word(u0: u64, h: u64, u1: u64, d: u64) u64
+    ensures |r| (r as int - (u0 as int - (h as int + u1 as int + 1) * d as int)) % 18446744073709551616 == 0
+{
+    let q1 = h.wrapping_add(u1).wrapping_add(1);
+    return u0.wrapping_sub(q1.wrapping_mul(d));
+}
+
+fn main() i32 {
+    let a = w3(0xFFFFFFFFFFFFFFFF, 2, 3);
+    let b = rem_word(100, 1, 2, 5);
+    return (a + b) as i32;
+}
+)",
+        85,
+    );
+    // A write through a pointer parameter reaches no local of the body, whose address a call took.
+    b.add(
+        "a local past a write through a parameter",
+        M"(fn put(a: u64, hi: *mut u64) u64
+    requires hi != null
+{
+    unsafe *hi = a;
+    return a;
+}
+
+fn kept(r: *mut u64, c: bool) u64
+    requires r != null
+    ensures |q| q == 6
+{
+    let mut q1: u64 = 0;
+    let _ = put(1, &mut q1);
+    q1 = 5;
+    if c {
+        q1 = q1 + 1;
+    } else {
+        q1 = 6;
+    }
+    unsafe *r = 1;
+    return q1;
+}
+
+fn main() i32 {
+    let mut x: u64 = 0;
+    return (kept(&mut x, true) + x) as i32;
+}
+)",
+        7,
+    );
+    // A `memset` sets its bytes to its value's low byte, in a block a field takes after it and in a
+    // field's block, and keeps the others.
+    b.add(
+        "the bytes a memset sets",
+        M"(import std::spec::seq as *;
+import string;
+
+struct B {
+    @owned
+    p: *mut u8,
+    cap: usize,
+}
+
+fn zero(n: usize) B
+    requires n > 3 && n < 1000
+    ensures |r| block(r.p).len() == n as nat && block(r.p)[2] == 0 && block(r.p)[n as int - 1] == 0
+    ensures |r| Global::owns(r.p, n, 1)
+{
+    let mut g = Global {};
+    let p = (unsafe g.alloc(n, 1)) as *mut u8;
+    unsafe string::memset(p, 0, n);
+    return B { p: p, cap: n };
+}
+
+fn part(b: &mut B, x: i32)
+    requires block(b.p).len() >= 8 && Global::owns(b.p, 8, 1)
+    ensures Global::owns(b.p, 8, 1)
+    ensures block(b.p).len() == old(block(b.p)).len() && block(b.p)[1] == x as u8 && block(b.p)[4] == old(block(b.p))[4]
+{
+    unsafe string::memset(b.p, x, 4);
+}
+
+fn main() i32 {
+    let mut b = zero(8);
+    part(&mut b, 0x1205);
+    let r = unsafe b.p[1] + unsafe b.p[4];
+    let mut g = Global {};
+    unsafe g.dealloc(b.p, 8, 1);
+    return r as i32;
+}
+)",
+        5,
+    );
+    // `pre_any`: the entry's `requires` hold of every argument, so the callee may call it with storage of
+    // its own.
+    b.add(
+        "an entry for any argument",
+        M"(fn hand(entry: fn(*mut void) void) bool
+    requires pre_any(entry)
+{
+    let mut x: u64 = 7;
+    entry(((&mut x) as *mut u64) as *mut void);
+    return x == 1;
+}
+
+fn any_job(env: *mut void)
+    requires env == null || env != null
+{
+    if env != null {
+        unsafe *(env as *mut u64) = 1;
+    }
+}
+
+fn plain_job(env: *mut void) {
+    let _ = env;
+}
+
+fn main() i32 {
+    let a = hand(any_job);
+    let b = hand(plain_job);
+    return if a && !b {
+        3
+    } else {
+        1
+    };
+}
+)",
+        3,
+    );
+    // A struct whose invariant a write through its pointer breaks: restored before a write through
+    // another pointer, which may reach it.
+    b.add(
+        "an invariant restored before a write through another pointer",
+        M"(struct S
+    invariant self.lo <= self.hi
+{
+    lo: u32,
+    hi: u32,
+}
+
+fn widen(p: *mut S, q: *mut u32)
+    requires p != null
+{
+    unsafe (*p).hi = 20;
+    unsafe (*p).lo = 10;
+    unsafe *q = 1;
+}
+
+fn main() i32 {
+    let mut s = S { lo: 0, hi: 1 };
+    let mut x: u32 = 0;
+    widen((&mut s) as *mut S, (&mut x) as *mut u32);
+    return (s.hi - s.lo + x) as i32;
+}
+)",
+        11,
     );
     b.add(
         "a chain of records: each holds the next",
@@ -3934,8 +4795,8 @@ fn main(args: Vector<str>) i32 {
 
 // The proof record of a build tree: a later build takes the proofs of each unchanged module from it,
 // an edit of a module proves it and its importers again, and a failed proof is never recorded. The
-// records every build tree shares give a new project std's proofs. A cache of its own: the suite's
-// holds other tests' records.
+// records every build tree shares give a new project std's proofs, and a budget outside the default is
+// part of the key. A cache of its own: the suite's holds other tests' records.
 @test
 fn proofs_are_recorded_per_module() {
     let p = cli::proj_new();
@@ -3971,6 +4832,15 @@ fn proofs_are_recorded_per_module() {
     );
     let again = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", "build");
     assert(again.ok() && again.out_has("prove: 1 to prove"), "the other modules take their proofs from the record");
+    // build.toml's `prove-steps` is part of the key of each module outside std: those prove again under
+    // it, std does not, and the default's records hold once it is gone.
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\nprove-steps = 20\n");
+    let starved = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", "build");
+    assert(starved.exit != 0 && starved.out_has("prove: 2 to prove"), "the two modules outside std prove again");
+    assert(starved.out_has("raise build.toml's 'prove-steps' (now 20)"), "20 steps are too few");
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    let back = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", "build");
+    assert(back.ok() && back.out_has("prove: 0 to prove"), "the default budget's records hold");
     p.mkfile(
         "src/lib.spc",
         "pub fn inc(x: u32) u32 requires x < 100 ensures |r| r == x + 1 || x == 7 { return x + 1; }\n",

@@ -1,5 +1,5 @@
 // Matrix products over row-major slices: on the SME tiles where the CPU has them (ffi/sc_sme.spc, one outer
-// product per tile per step of the inner dimension), over `Simd` lanes elsewhere (on x86_64, the build's
+// product per tile per step of the inner dimension), the byte products on the AMX tiles (ffi/sc_amx.spc), over `Simd` lanes elsewhere (on x86_64, the build's
 // run-time copies of the lanes kernels: `--simd-dispatch`). Every kernel gives the
 // same bits: element (i, j) is the fused multiply-add chain over p in order from +0.0, NaN payloads
 // aside; `f16` and `bf16` inputs widen exactly to `f32` first.
@@ -7,6 +7,7 @@ import std::cpu;
 import std::cpu::detect as detect;
 import std::simd;
 import sc_sme;
+import sc_amx;
 
 /// `c = a * b` for row-major `f32` matrices: `a` is `m x k`, `b` is `k x n` and `c` is `m x n`. Element
 /// (i, j) of `c` is `fma(a[i][k-1], b[k-1][j], .. fma(a[i][0], b[0][j], +0.0))`, one rounding per step,
@@ -19,6 +20,16 @@ pub fn mul_f32(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize) {
     mul_f32_on(c, a, b, m, k, n);
 }
 
+/// `c += a * b` for row-major `f32` matrices (a rank-k update), shaped as `mul_f32`: element (i, j) of
+/// `c` becomes `fma(a[i][k-1], b[k-1][j], .. fma(a[i][0], b[0][j], c[i][j]))`, one rounding per step, the
+/// same bits on every machine and kernel. Panics as `mul_f32`.
+pub fn mul_add_f32(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize) {
+    if !fits(c.len(), m, n) || !fits(a.len(), m, k) || !fits(b.len(), k, n) {
+        panic("matrix::mul_add_f32: a slice's length is not its matrix's element count");
+    }
+    mul_add_f32_on(c, a, b, m, k, n);
+}
+
 /// `c = a * b` for row-major `i8` matrices into `i32`: element (i, j) of `c` is the sum over p of
 /// `(a[i][p] as i32) * (b[p][j] as i32)` modulo 2^32, the same on every machine and kernel (SME outer
 /// products where the CPU has them). Panics as `mul_f32`.
@@ -27,6 +38,35 @@ pub fn mul_i8(c: []mut i32, a: []i8, b: []i8, m: usize, k: usize, n: usize) {
         panic("matrix::mul_i8: a slice's length is not its matrix's element count");
     }
     mul_i8_on(c, a, b, m, k, n);
+}
+
+/// `c = a * b` for row-major `i16` matrices into `i32`: element (i, j) of `c` is the sum over p of
+/// `(a[i][p] as i32) * (b[p][j] as i32)` modulo 2^32, the same on every machine and kernel (SME outer
+/// products where the CPU has them). Panics as `mul_f32`.
+pub fn mul_i16(c: []mut i32, a: []i16, b: []i16, m: usize, k: usize, n: usize) {
+    if !fits(c.len(), m, n) || !fits(a.len(), m, k) || !fits(b.len(), k, n) {
+        panic("matrix::mul_i16: a slice's length is not its matrix's element count");
+    }
+    mul_i16_on(c, a, b, m, k, n);
+}
+
+/// `c = a * b` for row-major `u8` (`a`) and `i8` (`b`) matrices into `i32`: element (i, j) of `c` is the
+/// sum over p of `(a[i][p] as i32) * (b[p][j] as i32)` modulo 2^32, the same on every machine and kernel
+/// (the SME kernel of `mul_i8` where the CPU has it). Panics as `mul_f32`.
+pub fn mul_u8i8(c: []mut i32, a: []u8, b: []i8, m: usize, k: usize, n: usize) {
+    if !fits(c.len(), m, n) || !fits(a.len(), m, k) || !fits(b.len(), k, n) {
+        panic("matrix::mul_u8i8: a slice's length is not its matrix's element count");
+    }
+    mul_u8i8_on(c, a, b, m, k, n);
+}
+
+/// `dst = src^T` for row-major `f32` matrices: `src` is `m x n`, `dst` is `n x m`, each element moved as
+/// its bits (on the SME tiles where the CPU has them). Panics as `mul_f32`.
+pub fn transpose_f32(dst: []mut f32, src: []f32, m: usize, n: usize) {
+    if !fits(dst.len(), n, m) || !fits(src.len(), m, n) {
+        panic("matrix::transpose_f32: a slice's length is not its matrix's element count");
+    }
+    transpose_f32_on(dst, src, m, n);
 }
 
 /// `c = a * b` for row-major `f16` matrices into `f32`: each element of `a` and `b` widened to `f32`
@@ -63,8 +103,12 @@ const fn fits(len: usize, r: usize, s: usize) bool {
 }
 
 static mut MUL_F32: detect::Dispatch = detect::Dispatch::new();
+static mut MUL_I16: detect::Dispatch = detect::Dispatch::new();
+static mut MUL_ADD_F32: detect::Dispatch = detect::Dispatch::new();
 static mut MUL_F64: detect::Dispatch = detect::Dispatch::new();
 static mut MUL_I8: detect::Dispatch = detect::Dispatch::new();
+static mut MUL_U8I8: detect::Dispatch = detect::Dispatch::new();
+static mut TRANSPOSE_F32: detect::Dispatch = detect::Dispatch::new();
 static mut MUL_F16: detect::Dispatch = detect::Dispatch::new();
 static mut MUL_BF16: detect::Dispatch = detect::Dispatch::new();
 
@@ -81,6 +125,36 @@ fn mul_f32_on(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize) {
 @arch(!aarch64)
 fn mul_f32_on(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize) {
     mul_f32_lanes(c, a, b, m, k, n);
+}
+
+@arch(aarch64)
+fn mul_add_f32_on(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize) {
+    let f = unsafe detect::dispatch::<fn([]mut f32, []f32, []f32, usize, usize, usize), 1>(
+        &mut unsafe MUL_ADD_F32,
+        [(cpu::Feature::Sme2, mul_add_f32_sme)],
+        mul_add_f32_lanes,
+    );
+    f(c, a, b, m, k, n);
+}
+
+@arch(!aarch64)
+fn mul_add_f32_on(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize) {
+    mul_add_f32_lanes(c, a, b, m, k, n);
+}
+
+@arch(aarch64)
+fn mul_i16_on(c: []mut i32, a: []i16, b: []i16, m: usize, k: usize, n: usize) {
+    let f = unsafe detect::dispatch::<fn([]mut i32, []i16, []i16, usize, usize, usize), 1>(
+        &mut unsafe MUL_I16,
+        [(cpu::Feature::Sme2, mul_i16_sme)],
+        mul_i16_lanes,
+    );
+    f(c, a, b, m, k, n);
+}
+
+@arch(!aarch64)
+fn mul_i16_on(c: []mut i32, a: []i16, b: []i16, m: usize, k: usize, n: usize) {
+    mul_i16_lanes(c, a, b, m, k, n);
 }
 
 @arch(aarch64)
@@ -108,9 +182,59 @@ fn mul_i8_on(c: []mut i32, a: []i8, b: []i8, m: usize, k: usize, n: usize) {
     f(c, a, b, m, k, n);
 }
 
-@arch(!aarch64)
+@arch(x86_64)
+fn mul_i8_on(c: []mut i32, a: []i8, b: []i8, m: usize, k: usize, n: usize) {
+    let f = unsafe detect::dispatch::<fn([]mut i32, []i8, []i8, usize, usize, usize), 1>(
+        &mut unsafe MUL_I8,
+        [(cpu::Feature::AmxInt8, mul_i8_amx)],
+        mul_i8_lanes,
+    );
+    f(c, a, b, m, k, n);
+}
+
+@arch(wasm32)
 fn mul_i8_on(c: []mut i32, a: []i8, b: []i8, m: usize, k: usize, n: usize) {
     mul_i8_lanes(c, a, b, m, k, n);
+}
+
+@arch(aarch64)
+fn transpose_f32_on(dst: []mut f32, src: []f32, m: usize, n: usize) {
+    let f = unsafe detect::dispatch::<fn([]mut f32, []f32, usize, usize), 1>(
+        &mut unsafe TRANSPOSE_F32,
+        [(cpu::Feature::Sme2, transpose_f32_sme)],
+        transpose_f32_blocks,
+    );
+    f(dst, src, m, n);
+}
+
+@arch(!aarch64)
+fn transpose_f32_on(dst: []mut f32, src: []f32, m: usize, n: usize) {
+    transpose_f32_blocks(dst, src, m, n);
+}
+
+@arch(aarch64)
+fn mul_u8i8_on(c: []mut i32, a: []u8, b: []i8, m: usize, k: usize, n: usize) {
+    let f = unsafe detect::dispatch::<fn([]mut i32, []u8, []i8, usize, usize, usize), 1>(
+        &mut unsafe MUL_U8I8,
+        [(cpu::Feature::Sme2, mul_u8i8_sme)],
+        mul_u8i8_lanes,
+    );
+    f(c, a, b, m, k, n);
+}
+
+@arch(x86_64)
+fn mul_u8i8_on(c: []mut i32, a: []u8, b: []i8, m: usize, k: usize, n: usize) {
+    let f = unsafe detect::dispatch::<fn([]mut i32, []u8, []i8, usize, usize, usize), 1>(
+        &mut unsafe MUL_U8I8,
+        [(cpu::Feature::AmxInt8, mul_u8i8_amx)],
+        mul_u8i8_lanes,
+    );
+    f(c, a, b, m, k, n);
+}
+
+@arch(wasm32)
+fn mul_u8i8_on(c: []mut i32, a: []u8, b: []i8, m: usize, k: usize, n: usize) {
+    mul_u8i8_lanes(c, a, b, m, k, n);
 }
 
 @arch(aarch64)
@@ -153,6 +277,22 @@ fn mul_f32_sme(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize) {
 }
 
 @arch(aarch64)
+@target_feature([cpu::Feature::Sme2])
+fn mul_add_f32_sme(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize) {
+    if sc_sme::sc_sme_built() == 0 || unsafe sc_sme::sc_sme_mul_add_f32(c.as_mut_ptr(), a.as_ptr(), b.as_ptr(), m, k, n) != 0 {
+        mul_add_f32_lanes(c, a, b, m, k, n);
+    }
+}
+
+@arch(aarch64)
+@target_feature([cpu::Feature::Sme2])
+fn mul_i16_sme(c: []mut i32, a: []i16, b: []i16, m: usize, k: usize, n: usize) {
+    if sc_sme::sc_sme_built() == 0 || unsafe sc_sme::sc_sme_mul_i16(c.as_mut_ptr(), a.as_ptr(), b.as_ptr(), m, k, n) != 0 {
+        mul_i16_lanes(c, a, b, m, k, n);
+    }
+}
+
+@arch(aarch64)
 @target_feature([cpu::Feature::SmeF64f64])
 fn mul_f64_sme(c: []mut f64, a: []f64, b: []f64, m: usize, k: usize, n: usize) {
     if sc_sme::sc_sme_built() == 0 || unsafe sc_sme::sc_sme_mul_f64(c.as_mut_ptr(), a.as_ptr(), b.as_ptr(), m, k, n) != 0 {
@@ -165,6 +305,60 @@ fn mul_f64_sme(c: []mut f64, a: []f64, b: []f64, m: usize, k: usize, n: usize) {
 fn mul_i8_sme(c: []mut i32, a: []i8, b: []i8, m: usize, k: usize, n: usize) {
     if sc_sme::sc_sme_built() == 0 || unsafe sc_sme::sc_sme_mul_i8(c.as_mut_ptr(), a.as_ptr(), b.as_ptr(), m, k, n) != 0 {
         mul_i8_lanes(c, a, b, m, k, n);
+    }
+}
+
+@arch(aarch64)
+@target_feature([cpu::Feature::Sme2])
+fn transpose_f32_sme(dst: []mut f32, src: []f32, m: usize, n: usize) {
+    if sc_sme::sc_sme_built() == 0 || unsafe sc_sme::sc_sme_transpose32(
+        dst.as_mut_ptr() as *mut u32,
+        src.as_ptr() as *const u32,
+        m,
+        n,
+    ) != 0 {
+        transpose_f32_blocks(dst, src, m, n);
+    }
+}
+
+@arch(aarch64)
+@target_feature([cpu::Feature::Sme2])
+fn mul_u8i8_sme(c: []mut i32, a: []u8, b: []i8, m: usize, k: usize, n: usize) {
+    if sc_sme::sc_sme_built() == 0 || unsafe sc_sme::sc_sme_mul_u8i8(c.as_mut_ptr(), a.as_ptr(), b.as_ptr(), m, k, n) != 0 {
+        mul_u8i8_lanes(c, a, b, m, k, n);
+    }
+}
+
+// The AMX kernels (ffi/sc_amx.spc) once the process has the tile state, else the lanes kernels.
+@arch(x86_64)
+@target_feature([cpu::Feature::AmxInt8])
+fn mul_i8_amx(c: []mut i32, a: []i8, b: []i8, m: usize, k: usize, n: usize) {
+    if sc_amx::sc_amx_built() == 0 || !detect::request(cpu::Feature::AmxInt8) || unsafe sc_amx::sc_amx_mul_i8(
+        c.as_mut_ptr(),
+        a.as_ptr() as *const u8,
+        b.as_ptr() as *const u8,
+        m,
+        k,
+        n,
+        false,
+    ) != 0 {
+        mul_i8_lanes(c, a, b, m, k, n);
+    }
+}
+
+@arch(x86_64)
+@target_feature([cpu::Feature::AmxInt8])
+fn mul_u8i8_amx(c: []mut i32, a: []u8, b: []i8, m: usize, k: usize, n: usize) {
+    if sc_amx::sc_amx_built() == 0 || !detect::request(cpu::Feature::AmxInt8) || unsafe sc_amx::sc_amx_mul_i8(
+        c.as_mut_ptr(),
+        a.as_ptr(),
+        b.as_ptr() as *const u8,
+        m,
+        k,
+        n,
+        true,
+    ) != 0 {
+        mul_u8i8_lanes(c, a, b, m, k, n);
     }
 }
 
@@ -223,11 +417,22 @@ fn mul_widened<const E: usize, const F: usize>(
 // The portable kernel: each row of `c` from +0.0, then for each p the row of `b` times `a[i][p]` added
 // with one rounding, 16 lanes at a time, `mul_add` past them.
 const fn mul_f32_lanes(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize) {
+    fma_rows_f32(c, a, b, m, k, n, true);
+}
+
+const fn mul_add_f32_lanes(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize) {
+    fma_rows_f32(c, a, b, m, k, n, false);
+}
+
+// Per row of `c` (first set to +0.0 when `zero`), the chains of fused multiply-adds over p in order.
+const fn fma_rows_f32(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize, zero: bool) {
     let nv = n - n % 16;
     for i in 0..m {
         let row = i * n;
-        for j in 0..n {
-            c[row + j] = 0.0;
+        if zero {
+            for j in 0..n {
+                c[row + j] = 0.0;
+            }
         }
         for p in 0..k {
             let x = a[i * k + p];
@@ -271,6 +476,31 @@ const fn mul_f64_lanes(c: []mut f64, a: []f64, b: []f64, m: usize, k: usize, n: 
 }
 
 // Each row of `c` from 0, then for each p the row of `b` widened to i32 times `a[i][p]`, added modulo 2^32.
+const fn mul_i16_lanes(c: []mut i32, a: []i16, b: []i16, m: usize, k: usize, n: usize) {
+    let nv = n - n % 16;
+    for i in 0..m {
+        let row = i * n;
+        for j in 0..n {
+            c[row + j] = 0;
+        }
+        for p in 0..k {
+            let x = a[i * k + p] as i32;
+            let xv = Simd::<i32, 16>::splat(x);
+            let brow = p * n;
+            let mut j: usize = 0;
+            while j < nv {
+                let bv = simd::load::<i16, 16>(b, brow + j).widen::<i32>();
+                simd::store(c, row + j, xv.wrapping_mul(bv).wrapping_add(simd::load::<i32, 16>(c, row + j)));
+                j += 16;
+            }
+            while j < n {
+                c[row + j] = c[row + j].wrapping_add(x.wrapping_mul(b[brow + j]));
+                j += 1;
+            }
+        }
+    }
+}
+
 const fn mul_i8_lanes(c: []mut i32, a: []i8, b: []i8, m: usize, k: usize, n: usize) {
     let nv = n - n % 16;
     for i in 0..m {
@@ -293,5 +523,50 @@ const fn mul_i8_lanes(c: []mut i32, a: []i8, b: []i8, m: usize, k: usize, n: usi
                 j += 1;
             }
         }
+    }
+}
+
+// `mul_i8_lanes` with the rows of `a` unsigned.
+const fn mul_u8i8_lanes(c: []mut i32, a: []u8, b: []i8, m: usize, k: usize, n: usize) {
+    let nv = n - n % 16;
+    for i in 0..m {
+        let row = i * n;
+        for j in 0..n {
+            c[row + j] = 0;
+        }
+        for p in 0..k {
+            let x = a[i * k + p] as i32;
+            let xv = Simd::<i32, 16>::splat(x);
+            let brow = p * n;
+            let mut j: usize = 0;
+            while j < nv {
+                let bv = simd::load::<i8, 16>(b, brow + j).widen::<i32>();
+                simd::store(c, row + j, xv.wrapping_mul(bv).wrapping_add(simd::load::<i32, 16>(c, row + j)));
+                j += 16;
+            }
+            while j < n {
+                c[row + j] = c[row + j].wrapping_add(x.wrapping_mul(b[brow + j]));
+                j += 1;
+            }
+        }
+    }
+}
+
+// The portable transpose: blocks of 16 x 16, so a block's source rows and destination rows stay in cache.
+const fn transpose_f32_blocks(dst: []mut f32, src: []f32, m: usize, n: usize) {
+    let mut i0: usize = 0;
+    while i0 < m {
+        let ie = (i0 + 16).min(m);
+        let mut j0: usize = 0;
+        while j0 < n {
+            let je = (j0 + 16).min(n);
+            for i in i0..ie {
+                for j in j0..je {
+                    dst[j * m + i] = src[i * n + j];
+                }
+            }
+            j0 = je;
+        }
+        i0 = ie;
     }
 }

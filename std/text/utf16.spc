@@ -162,3 +162,12 @@ const fn high_surrogate(c: u32) u16 {
 const fn low_surrogate(c: u32) u16 {
     return (0xDC00 | c - 0x10000 & 0x3FF) as u16;
 }
+
+// The pair `encode` writes for a supplementary scalar value is a high and a low surrogate, from which
+// `decode` computes that value back.
+lemma surrogates_round_trip(c: u32)
+    requires 0x10000 <= c && c <= 0x10FFFF
+    ensures 0xD800 <= high_surrogate(c) && high_surrogate(c) <= 0xDBFF
+    ensures 0xDC00 <= low_surrogate(c) && low_surrogate(c) <= 0xDFFF
+    ensures 0x10000 + (high_surrogate(c) as u32 - 0xD800 << 10 | low_surrogate(c) as u32 - 0xDC00) == c
+{}

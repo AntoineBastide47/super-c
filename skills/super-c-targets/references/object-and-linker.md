@@ -58,6 +58,18 @@ A linker:
 1. reads the objects and the archives' members that define a needed symbol, and the system's shared
    libraries for their exported names (and versions, ELF);
 2. resolves symbols: one definition each, weak rules, undefined ones bound to a library or an error;
+   with GC, drops what no root reaches, and with `--icf=safe` (`-ffold-functions`) keeps one copy of
+   identical code parts whose address nothing takes (`fold_code` per format over `link::util::fold`:
+   parts of one key and bytes, their relocations' targets compared by class, the classes split until
+   they agree, as LLD's identical code folding). The walk that marks the live parts marks the taken
+   ones: every reference but a call's or a jump's (Mach-O `R_BRANCH26`, ELF `PLT32`, `CALL26`,
+   `JUMP26`, COFF `REL32` after `E8`, `E9` or `0F 8x` in code, wasm `R_FUNCTION_INDEX_LEB`), the
+   entry, the exports and the kept symbols. A part with personality or language data stays; wasm
+   compares bodies with their relocation fields cleared (they hold the object's own indices). A folded
+   part lands at its copy (its symbols name the copy's address); its unwind entries go; its debug
+   references tombstone but ELF `.debug_line`'s, and the Mach-O debug map leaves it out. It removes
+   about 1% of the compiler's code (Mach-O arm64 1.7%, ELF arm64 1.7%, ELF x86-64 1.0%, PE 1.0%, wasm
+   0.5% of the module) for about 6% more link time;
 3. lays out the image: segments, sections merged by kind, alignment, the entry point's start code.
    arm64 (Mach-O and ELF, `keep_code`): once a code section's address is known, each input section of
    it (a function, under `-ffunction-sections` or Mach-O's split at symbols) moves forward by the

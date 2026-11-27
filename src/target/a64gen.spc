@@ -29,6 +29,13 @@ import ir::core as core;
 import std::float as fl;
 import target::assembler as asmr;
 import target::intrin as intrin;
+import target::table as tgt;
+
+// MRS x16, DIT; MSR DIT, #1; MSR DIT, #0; ISB (Arm ARM: DIT, ISB).
+const MRS_DIT_IP0: u32 = 0xD53B42B0;
+const MSR_DIT_1: u32 = 0xD503415F;
+const MSR_DIT_0: u32 = 0xD503405F;
+const ISB: u32 = 0xD5033FDF;
 import ast::ast as ast;
 
 // `Gen::zero_quads` counts at most this many runs of four stores of 0.
@@ -36,6 +43,30 @@ const ZERO_QUADS: u32 = 8;
 const V0: u8 = 32; // register number of v0: x registers are 0..31
 
 // The register number of part `pa`.
+// The SVE comparison into p0 governed by p7 of each LIR condition (`C_*` order; `pred_mask` takes an integer
+// one, or a float `oeq`, `une`, `olt` .. `oge`): its encoding of p0, p7 and size 0, and whether its operands
+// swap (`a < b` is `b > a`); 0 for none.
+const SVE_CMP: [(u32, bool); 18] = [
+    (0x2400A000, false), // eq: CMPEQ
+    (0x2400A010, false), // ne: CMPNE
+    (0x24008010, true), // slt: CMPGT
+    (0x24008000, true), // sle: CMPGE
+    (0x24008010, false), // sgt
+    (0x24008000, false), // sge
+    (0x24000010, true), // ult: CMPHI
+    (0x24000000, true), // ule: CMPHS
+    (0x24000010, false), // ugt
+    (0x24000000, false), // uge
+    (0x65006000, false), // oeq: FCMEQ
+    (0, false), // one
+    (0x65004010, true), // olt: FCMGT
+    (0x65004000, true), // ole: FCMGE
+    (0x65004010, false), // ogt
+    (0x65004000, false), // oge
+    (0, false), // ueq
+    (0x65006010, false), // une: FCMNE
+];
+
 const fn preg(pa: ab::Part) u8 {
     return pa.reg + ast::pick(pa.v, V0, 0);
 }
@@ -189,6 +220,7 @@ pub(package) struct Gen {
     arr_blk: u32,
     left: Vector<(u32, u8, u32)>,
     canary: i64, // the stack canary's slot above the LIR slots, -1 when none
+    dit: i64, // the slot of PSTATE.DIT's value at the entry of a constant-time body (`dit_on`), -1 when none
     // The register save area of a variadic body under the standard convention (x0..x7 at its start,
     // then q0..q7), NONE when none.
     va_save: u32,
@@ -204,6 +236,15 @@ pub(package) struct Gen {
     zreg: u8,
     zwide: bool,
     zat: u32,
+    // The lane mask whose SVE predicate p0 holds at element size `psz` (`masked_pred`; VNONE: none), set at
+    // word `pat` of the current block: a later access of its block takes it while no call came between.
+    pv: Value,
+    psz: u32,
+    pat: u32,
+    // The comparison p0 holds (`pred_mask`: its code and operands; C_COUNT: lane mask `pa`'s nonzero lanes).
+    pc: u16,
+    pa: Value,
+    pb: Value,
     fix: Vector<u64>, // word << 32 | block: a branch to patch
     // A conditional branch to a block is an inverted one over a `B`: the function is past the 1 MiB a
     // conditional branch reaches (`func`).
@@ -257,6 +298,11 @@ pub(package) struct Gen {
     nlay: usize,
     mv: Vector<Mv>,
     local: bool, // the function compiling is a local copy
+    // The function compiling is the copy of run-time level `copy_k` (`Package.copy_flags`; 0 for none), or
+    // the body under the stub (`stub`) that picks a copy of `stub_levels`.
+    copy_k: u32,
+    stub: bool,
+    stub_levels: Vector<u32>,
     cs: ob::CStrs, // the object's C strings
 }
 
@@ -326,6 +372,7 @@ extend Gen {
             arr_blk: 0,
             left: Vector::<(u32, u8, u32)>::new(),
             canary: -1,
+            dit: -1,
             va_save: NONE,
             late_va: Vector::<(u32, Va)>::new(),
             stubs_out: false,
@@ -334,6 +381,12 @@ extend Gen {
             zreg: NOREG,
             zwide: false,
             zat: 0,
+            pv: VNONE,
+            psz: 0,
+            pat: 0,
+            pc: C_COUNT,
+            pa: VNONE,
+            pb: VNONE,
             fix: Vector::<u64>::new(),
             far: false,
             shrink: false,
@@ -368,6 +421,9 @@ extend Gen {
             nlay: 0,
             mv: Vector::<Mv>::new(),
             local: false,
+            copy_k: 0,
+            stub: false,
+            stub_levels: Vector::<u32>::new(),
             cs: ob::CStrs::new(),
         };
     }
@@ -872,15 +928,10 @@ extend Gen {
     }
 
     // Result `i` in the register of parameter `px` (`step_param`), as a temporary from here: a value the
-    // plan puts there before the edge moves it out (`vacate_temp`).
+    // plan puts there before the edge moves it out (`vacate_temp`), to its home when it has no other copy.
     fn step_into(self: &mut Self, i: u32, px: u32) u8 {
         let r = self.cr.va[px as usize].reg;
-        self.cr.lock |= bit(r);
-        self.cr.set_owner(r, i);
-        let w = self.cr.va.index_mut(i as usize);
-        w.reg = r;
-        w.dirty = false;
-        w.clean = false;
+        self.cr.bind(i, r);
         return r;
     }
 
@@ -1245,11 +1296,11 @@ extend Gen {
                 &mut un,
             ) != NONE || (t.op == O_SPLAT || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI || t.op == O_WCONST || t.op == O_VINSERT || t.op == O_VSUMW || t.op == O_VMULW) && in_vreg(
                 t.ty,
-            ) || (t.op == O_VCMP || t.op == O_VEXTRACT) && in_vreg(self.cr.vt(t.a)) || t.op == O_VOP && self.vop_reg(t) || self.conv_reg(
+            ) || self.dot_reg(t) || (t.op == O_VCMP || t.op == O_VEXTRACT) && in_vreg(self.cr.vt(t.a)) || t.op == O_VOP && self.vop_reg(
                 t,
-            ) || (t.op == O_LSHR || t.op == O_ASHR || t.op == O_MULHS || t.op == O_MULHU) && is_vec(t.ty) && in_vreg(
+            ) || self.conv_reg(t) || (t.op == O_LSHR || t.op == O_ASHR || t.op == O_MULHS || t.op == O_MULHU) && is_vec(
                 t.ty,
-            ) || t.op == O_BITCAST && in_vreg(t.ty) && in_vreg(self.cr.vt(t.a));
+            ) && in_vreg(t.ty) || t.op == O_BITCAST && in_vreg(t.ty) && in_vreg(self.cr.vt(t.a));
             // An intrinsic's template reads its arguments and writes its result in v registers when the call
             // passes them whole there (`call` renames them in place).
             let intr = t.op == O_CALL && self.intrinsic(t.a).len() != 0;
@@ -1510,7 +1561,7 @@ extend Gen {
         let ni = b.insts.len();
         self.hform.truncate(0);
         self.hform.resize_default(ni);
-        if unsafe (*self.pkg).cpu_of(self.cr.b()).half != HALF_ARITH {
+        if self.cpu().half != HALF_ARITH {
             return;
         }
         // Each value's uses: `Live::folds`' counts.
@@ -2050,11 +2101,11 @@ extend Gen {
         // memory goes through `mloc`).
         let reg_form = t.op == O_STORE || t.op == O_SPLAT || t.op == O_VOP || t.op == O_CALL || t.op == O_CALLIND || is_vec(
             t.ty,
-        ) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT || t.op == O_MULHS || t.op == O_MULHU || t.op == O_VCMP || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI || t.op == O_VINSERT || t.op == O_VSUMW || t.op == O_VMULW) || t.op == O_VEXTRACT || self.conv_reg(
+        ) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT || t.op == O_MULHS || t.op == O_MULHU || t.op == O_VCMP || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI || t.op == O_VINSERT || t.op == O_VSUMW || t.op == O_VMULW) || self.dot_reg(
             t,
-        ) || t.op == O_BITCAST && in_vreg(self.cr.vt(t.a)) && (in_vreg(t.ty) || is_int(t.ty) && type_bytes(t.ty, 8) == 8) || self.lane_pair(
-            t,
-        ) || lv::lane0_op(self.cr.b(), &self.cr.lv.pfold, t);
+        ) || t.op == O_VEXTRACT || self.conv_reg(t) || t.op == O_BITCAST && in_vreg(self.cr.vt(t.a)) && (in_vreg(t.ty) || is_int(
+            t.ty,
+        ) && type_bytes(t.ty, 8) == 8) || self.lane_pair(t) || lv::lane0_op(self.cr.b(), &self.cr.lv.pfold, t);
         if !reg_form && !is_terminator(t.op) {
             for k in 0..self.cr.uses.len() {
                 self.sync(self.cr.uses[k]);
@@ -2296,12 +2347,13 @@ extend Gen {
             return false;
         }
         let p = unsafe &*self.pkg;
-        let ps = p.syms[self.cr.b().syms[it.a as usize] as usize];
-        if ps.kind != SK_DATA || ps.ext || ps.def == NONE || self.got_global(ps) {
+        let sy = self.cr.b().syms[it.a as usize];
+        let ps = p.syms[sy as usize];
+        if ps.kind != SK_DATA || ps.ext || !p.defines(sy) || self.got_global(ps) {
             return false;
         }
         let k = (it.b as i32) as i64 + off;
-        if k < 0 || 1u32 << p.data[ps.def as usize].align_log2 < bytes || k % bytes as i64 != 0 {
+        if k < 0 || 1u32 << p.data_align(sy) < bytes || k % bytes as i64 != 0 {
             return false;
         }
         *s = it.a;
@@ -2627,12 +2679,70 @@ const fn mkind(t: u8, load: bool) u32 {
     return ast::pick(t == T_I32, a::M_W, a::M_X);
 }
 
+// The instructions the flags `f` (`CPU_SCALAR`) save on instruction `t` of body `b`
+// (`place::copy_levels`): LSE 3 on a read-modify-write or a compare-and-swap (one instruction for an
+// exclusive load, the operation, an exclusive store and its retry branch), RCPC 1 on an acquire load (no
+// instruction, a weaker order); CSSC 3 on a scalar count of set bits (CNT for a vector round trip of
+// four), 1 on one of trailing zeros (CTZ for RBIT and CLZ). Its minimum, maximum and absolute value
+// (`min_max`, `abs_select`) save one comparison each: none counted.
+const fn copy_differs(_b: &Body, t: Inst, f: u32) u32 {
+    if (f & CPU_LSE) != 0 && (t.op == O_ARMW || t.op == O_ACAS) {
+        return 3;
+    }
+    if (f & CPU_RCPC) != 0 && t.op == O_ALOAD && (t.aux & 7) == MO_ACQUIRE {
+        return 1;
+    }
+    if (f & CPU_CSSC) == 0 || is_vec(t.ty) {
+        return 0;
+    }
+    return ast::pick(t.op == O_POPCNT, 3u32, (t.op == O_CTZ) as u32);
+}
+
 // ---- Functions ----
 
 extend Gen {
     /// Compile the body of package function symbol `s` into the object. False (with `err`) when the
-    /// body uses what the generator does not compile.
+    /// body uses what the generator does not compile. A body whose code a run-time level's flags change
+    /// (`place::copy_levels`, `copy_differs`: LSE and RCPC, CSSC) compiles once per such level, a local
+    /// copy `<name>.l<k>` with the level's flags, then without them as `<name>.base`; a stub under the
+    /// function's own name branches to the copy of the highest level the CPU has (`level_entry`), the
+    /// arguments as the caller left them.
     pub(package) fn func(self: &mut Self, s: u32, local: bool) bool {
+        let p = unsafe &*self.pkg;
+        let b = &p.bodies[p.syms[s as usize].def as usize];
+        let mut lv = replace(&mut self.stub_levels, Vector::<u32>::new());
+        place::copy_levels(p, b, copy_differs, &mut lv);
+        if lv.len() == 0 {
+            self.stub_levels = lv;
+            return self.func_once(s, local);
+        }
+        let mut ok = true;
+        for q in 0..lv.len() {
+            self.copy_k = lv[q];
+            ok = ok && self.func_once(s, local);
+        }
+        self.copy_k = 0;
+        self.stub_levels = lv;
+        if !ok {
+            return false;
+        }
+        self.stub = true;
+        let ok2 = self.func_once(s, local);
+        self.stub = false;
+        return ok2;
+    }
+
+    // The processor facts of the body compiling: its own, with a run-time copy's level flags.
+    const fn cpu(self: &Self) Cpu {
+        let p = unsafe &*self.pkg;
+        let c = p.cpu_of(self.cr.b());
+        if self.copy_k == 0 {
+            return c;
+        }
+        return c.with_flags(p.copy_flags[self.copy_k as usize - 1]);
+    }
+
+    fn func_once(self: &mut Self, s: u32, local: bool) bool {
         self.local = local;
         let p = unsafe &*self.pkg;
         let ps = p.syms[s as usize];
@@ -2641,7 +2751,8 @@ extend Gen {
         let b = self.cr.b();
         self.cr.lv.fold_max = 16;
         self.cr.lv.three = true;
-        self.cr.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX | lv::FOLD_VMLA | lv::FOLD_VWADD | lv::FOLD_VSHIMM_ALL | lv::FOLD_TRUNC | lv::FOLD_TRUNC_ONCE | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_LANE_MUL | lv::FOLD_ZSHL | lv::FOLD_LANE_PAIR | lv::FOLD_XUSE | lv::FOLD_VIEW | lv::FOLD_FJOIN;
+        self.cr.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX | lv::FOLD_VMLA | lv::FOLD_VWADD | lv::FOLD_VSHIMM_ALL | lv::FOLD_TRUNC | lv::FOLD_TRUNC_ONCE | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_LANE_MUL | lv::FOLD_ZSHL | lv::FOLD_LANE_PAIR | lv::FOLD_XUSE | lv::FOLD_VIEW | lv::FOLD_FJOIN | lv::FOLD_LD3 | lv::FOLD_PRED;
+        self.cr.lv.pred_all = self.cpu().vpred;
         self.cr.lv.ext_args = self.apple;
         // A compilation again (`again`: without shrink-wrapping, or with far branches) keeps the relays, the
         // canary and the analysis of the body but its layout.
@@ -2667,7 +2778,7 @@ extend Gen {
             // the address of a slot or of an aggregate parameter that arrives in registers that may outlive
             // it. `shrinkable` reads it: a call that stays one needs the frame.
             place::held_params(b, &self.cr.self_lay, &mut self.cr.pheld);
-            self.cr.tail_ok = unsafe (*self.pkg).tail && !self.prot && (self.opf & lv::OP_VASTART) == 0 && place::tail_candidate(
+            self.cr.tail_ok = unsafe (*self.pkg).tail && !self.prot && !self.dit_on() && (self.opf & lv::OP_VASTART) == 0 && place::tail_candidate(
                 b,
             ) && !lver::frame_escapes(b, &self.cr.pheld);
         }
@@ -2797,7 +2908,7 @@ extend Gen {
         // A conditional branch out of range: once more, every one of them over a `B`.
         self.far = true;
         self.again = true;
-        let ok = self.func(s, local);
+        let ok = self.func_once(s, local);
         self.far = false;
         return ok;
     }
@@ -2822,7 +2933,7 @@ extend Gen {
     fn fp_args(self: &mut Self, s: u32, local: bool) bool {
         self.no_sp_args = true;
         self.again = true;
-        let ok = self.func(s, local);
+        let ok = self.func_once(s, local);
         self.no_sp_args = false;
         return ok;
     }
@@ -2837,7 +2948,7 @@ extend Gen {
     fn unshrunk(self: &mut Self, s: u32, local: bool) bool {
         self.no_shrink = true;
         self.again = true;
-        let ok = self.func(s, local);
+        let ok = self.func_once(s, local);
         self.no_shrink = false;
         return ok;
     }
@@ -2855,7 +2966,7 @@ extend Gen {
     // between rare blocks, set the frame up: `Live::after`, which the layout puts after the others.
     fn shrinkable(self: &mut Self) bool {
         let b = self.cr.b();
-        if self.prot || self.opf != 0 {
+        if self.prot || self.opf != 0 || self.dit_on() {
             return false;
         }
         for k in 0..b.slots.len() {
@@ -2952,7 +3063,49 @@ extend Gen {
 
     // Whether a code word before `to` is a `BL` or a `BLR`.
     const fn calls_before(self: &Self, to: u32) bool {
-        for w in 0..to {
+        return self.calls_in(0, to);
+    }
+
+    // Whether a code word from `from` to `to` is a `BL` or a `BLR`.
+    // p0 = comparison `c` of the vectors `v` and `w` of `n` lanes of 1 << `sz` bytes (`pred_mask`), or (`c`
+    // C_COUNT) lane mask `v`'s nonzero lanes, under PTRUE p7 of those lanes.
+    fn set_pred(self: &mut Self, c: u16, v: Value, w: Value, sz: u32, n: u32) {
+        let rm = self.vec_use(v, V0 + 30) as u32 - V0 as u32;
+        // PTRUE's patterns VL1 to VL8 are 1 to 8, VL16 is 9.
+        self.emit(a::sve_ptrue(sz, 7, ast::pick(n <= 8, n, 9u32)));
+        if c != C_COUNT {
+            let rw = self.vec_use(w, V0 + 31) as u32 - V0 as u32;
+            let (base, swap) = SVE_CMP[c as usize];
+            self.emit(base | sz << 22 | ast::pick(swap, rm, rw) << 16 | 7u32 << 10 | ast::pick(swap, rw, rm) << 5);
+        } else {
+            self.emit(a::sve_cmpne_imm(sz, 0, 7, rm, 0));
+        }
+        self.pv = VNONE;
+        self.psz = sz;
+        self.pat = self.code.len() as u32;
+        self.pc = c;
+        self.pa = v;
+        self.pb = w;
+    }
+
+    // Whether p0 holds lane mask `m` at element size `sz`: the comparison or the lane mask whose predicate
+    // a masked access of the block set (`pv`, `pc`), no call between.
+    const fn holds_pred(self: &Self, m: Value, sz: u32) bool {
+        if self.pa == VNONE || self.psz != sz || self.calls_in(self.pat, self.code.len() as u32) {
+            return false;
+        }
+        if self.pc == C_COUNT {
+            return m == self.pa;
+        }
+        if (m & (VPARAM | VFLAG)) != 0 || m == VNONE {
+            return false;
+        }
+        let t = self.cr.b().insts[m as usize];
+        return t.op == O_VCMP && t.aux == self.pc && t.a == self.pa && t.b == self.pb;
+    }
+
+    const fn calls_in(self: &Self, from: u32, to: u32) bool {
+        for w in from..to {
             let x = self.code[w as usize];
             if (x & 0xFC000000) == 0x94000000 || (x & 0xFFFFFC1F) == 0xD63F0000 {
                 return true;
@@ -3049,6 +3202,12 @@ extend Gen {
             self.canary = at;
             at += 8;
         }
+        self.dit = -1;
+        if self.dit_on() {
+            at = at + 7 & ~7u32;
+            self.dit = at;
+            at += 8;
+        }
         self.cr.spill_base = at + 15 & ~15u32;
         self.cr.spill_top = 0;
     }
@@ -3059,6 +3218,17 @@ extend Gen {
         if self.canary >= 0 {
             self.guard(a::IP0 as u8);
             self.mem(a::M_X, false, a::IP0 as u8, a::SP, self.canary);
+        }
+        if self.dit >= 0 {
+            // DIT's value into its slot; set unless it is (bit 24), then a barrier, so that no later
+            // instruction runs before it holds (Arm: DIT, data-independent timing).
+            let skip = self.dit_supported();
+            self.emit(MRS_DIT_IP0);
+            self.mem(a::M_X, false, a::IP0 as u8, a::SP, self.dit);
+            self.emit(a::tbz(true, a::IP0, 24, 12));
+            self.emit(MSR_DIT_1);
+            self.emit(ISB);
+            self.dit_patch(skip);
         }
         self.ret_stores();
         if self.va_save != NONE {
@@ -3360,6 +3530,8 @@ extend Gen {
         }
         self.cr.pos = q;
         self.btest_x = NONE;
+        self.pv = VNONE;
+        self.pa = VNONE;
         let k = self.cr.lv.order[q as usize];
         let b = self.cr.b();
         self.blk_at[k as usize] = self.code.len() as u32;
@@ -3916,7 +4088,9 @@ extend Gen {
             return true;
         }
         if (op == O_SPLAT || op == O_WCONST) && self.cr.lv.pfold[i as usize] {
-            return true; // its shifts take it as an immediate (`lv::FOLD_VSHIMM_ALL`)
+            // Its shifts take it as an immediate (`lv::FOLD_VSHIMM_ALL`), or the masked loads it is the
+            // fallback of zero their other lanes themselves (`lv::FOLD_PRED`).
+            return true;
         }
         if op == O_VEXTRACT && self.cr.lv.pfold[i as usize] {
             return true; // its splat reads the lane (`lv::FOLD_LANE`)
@@ -3967,7 +4141,10 @@ extend Gen {
             return true;
         }
         if op == O_VCMP {
-            self.vcmp(i, t);
+            // Unless SVE selects read it alone (`lv::Live::pred_sels`).
+            if !self.cr.lv.pfold[i as usize] {
+                self.vcmp(i, t);
+            }
             return true;
         }
         if op == O_VSEL {
@@ -3980,6 +4157,10 @@ extend Gen {
         }
         if op == O_VSUMW {
             self.vsumw(i, t);
+            return true;
+        }
+        if op == O_VDOT {
+            self.vdot(i, t);
             return true;
         }
         if op == O_VMULW {
@@ -4213,6 +4394,9 @@ extend Gen {
             return self.sys(i, t);
         }
         if op == O_ASM {
+            // Its clobbers may take the predicates.
+            self.pv = VNONE;
+            self.pa = VNONE;
             return self.asm_inst(i, t);
         }
         if op == O_VAEND {
@@ -4743,12 +4927,13 @@ extend Gen {
     }
 
     // clz: CLZ; ctz: RBIT then CLZ; popcnt: CNT over the bytes in v30 (of 4 bytes but at 64 bits), summed
-    // by ADDV. An operand under
+    // by ADDV. With FEAT_CSSC ctz and popcnt are CTZ and CNT of the general register. An operand under
     // 32 bits is zero-extended, but for ctz, whose bit set at the width (making 0 count the width) hides
     // the bits above it. The count, at most the width, is `clean`.
     fn bit_count(self: &mut Self, i: u32, t: Inst) {
         let bits = type_bits(t.ty, self.cr.ptr);
         let sf = bits == 64;
+        let cssc = self.cpu().cssc;
         let mut r = if bits < 32 && t.op != O_CTZ {
             self.ext(t.a, false, bits) as u32
         } else {
@@ -4760,6 +4945,10 @@ extend Gen {
         }
         let rd = self.def_step(i) as u32;
         self.cr.va.index_mut(i as usize).clean = true;
+        if cssc && t.op != O_CLZ {
+            self.emit(a::dp1(sf, ast::pick(t.op == O_CTZ, a::DP1_CTZ, a::DP1_CNT), rd, r));
+            return;
+        }
         if t.op == O_POPCNT {
             // A 32-bit move for a narrower count: the register's bits above 32 are no part of the value.
             self.emit(a::fmov_gv(sf, true, 30, r));
@@ -4776,6 +4965,29 @@ extend Gen {
         if t.op == O_CLZ && bits < 32 {
             self.emit(a::addsub_imm(false, 1, false, rd, rd, 32 - bits, false));
         }
+    }
+
+    // The trailing zeros of 64-bit register `rn` into `rd`: CTZ with FEAT_CSSC, else RBIT then CLZ.
+    fn ctz64(self: &mut Self, rd: u32, rn: u32) {
+        if self.cpu().cssc {
+            self.emit(a::dp1(true, a::DP1_CTZ, rd, rn));
+            return;
+        }
+        self.emit(a::dp1(true, a::DP1_RBIT, rd, rn));
+        self.emit(a::dp1(true, a::DP1_CLZ, rd, rd));
+    }
+
+    // The set bits of 64-bit register `rn` into `rd`: CNT with FEAT_CSSC, else CNT of its bytes in v30
+    // summed by ADDV.
+    fn popcnt64(self: &mut Self, rd: u32, rn: u32) {
+        if self.cpu().cssc {
+            self.emit(a::dp1(true, a::DP1_CNT, rd, rn));
+            return;
+        }
+        self.emit(a::fmov_gv(true, true, 30, rn));
+        self.emit(a::cnt8b(30, 30));
+        self.emit(a::addv8b(30, 30));
+        self.emit(a::fmov_gv(false, false, rd, 30));
     }
 
     // Whether value `v` is an instruction that folds into its use (`lv::FOLD_*`).
@@ -5693,7 +5905,7 @@ extend Gen {
         let bk = b.blocks[self.cr.lv.def_blk[i as usize] as usize];
         let t = b.insts[i as usize];
         let load = t.op == O_LOAD;
-        if !load && t.op != O_STORE || (t.aux & MEM_VOLATILE) != 0 || self.cr.lv.fold[i as usize] {
+        if !load && t.op != O_STORE || (t.aux & MEM_VOLATILE) != 0 || self.cr.lv.fold[i as usize] || self.cr.lv.pfold[i as usize] {
             return NONE;
         }
         let ty = if load {
@@ -5720,7 +5932,7 @@ extend Gen {
                     self.cr.vt(u.b)
                 };
                 let delta = (u.c as i32) as i64 - (t.c as i32) as i64;
-                if u.a != t.a || mkind(uy, load) != m || delta != size && delta != -size || (u.aux & MEM_VOLATILE) != 0 || self.cr.lv.fold[j as usize] || load && self.stepped.contains(
+                if u.a != t.a || mkind(uy, load) != m || delta != size && delta != -size || (u.aux & MEM_VOLATILE) != 0 || self.cr.lv.fold[j as usize] || self.cr.lv.pfold[j as usize] || load && self.stepped.contains(
                     &j,
                 ) {
                     if load && (u.aux & MEM_VOLATILE) == 0 {
@@ -5948,6 +6160,9 @@ extend Gen {
     }
 
     fn load(self: &mut Self, i: u32, t: Inst) bool {
+        if self.cr.lv.pfold[i as usize] {
+            return true; // its shuffles load the group (`lv::FOLD_LD3`)
+        }
         let ty = t.ty;
         // A part of a register-passed aggregate: its register already.
         for q in 0..self.taken.len() {
@@ -6416,6 +6631,96 @@ extend Gen {
         return ast::pick(y == c.a || self.same_sign(y, c.a), y, VNONE);
     }
 
+    // FEAT_CSSC: integer select `t` (instruction `i`) of the two operands of an ordering comparison it
+    // tests, `x < y ? x : y` or `x < y ? y : x` and the other orders, as their minimum or maximum (SMIN,
+    // SMAX, UMIN, UMAX of the comparison's signedness): no comparison, no flags. A narrower type extends
+    // both operands by that signedness first and takes the 32-bit form; a constant operand that fits 8
+    // bits is the immediate form's. Whether it did.
+    fn min_max(self: &mut Self, i: u32, t: Inst) bool {
+        let bits = type_bits(t.ty, self.cr.ptr);
+        if !self.cpu().cssc || !is_int(t.ty) || bits > 64 || (t.a & (VPARAM | VFLAG)) != 0 || self.cr.lv.conj[t.a as usize] != 0 {
+            return false;
+        }
+        let c = self.cr.b().insts[t.a as usize];
+        if c.op != O_ICMP || c.aux < C_SLT || c.aux > C_UGE || self.cr.vt(c.a) != t.ty {
+            return false;
+        }
+        let direct = t.b == c.a && t.c == c.b;
+        if !direct && !(t.b == c.b && t.c == c.a) {
+            return false;
+        }
+        // `x < y ? x : y` is the minimum; a greater-than test or the swapped sides make the maximum.
+        let less = c.aux == C_SLT || c.aux == C_SLE || c.aux == C_ULT || c.aux == C_ULE;
+        let signed = signed_cond(c.aux);
+        let opc = ast::pick(less == direct, 2u32, 0u32) | ast::pick(signed, 0u32, 1u32);
+        let sf = bits == 64;
+        let rn = if bits < 32 {
+            self.ext(c.a, signed, bits)
+        } else {
+            self.reg(c.a)
+        } as u32;
+        let mut k: u64 = 0;
+        let kv: i64 = if !self.cr.const_of(c.b, &mut k) {
+            256
+        } else if signed {
+            sign_extend(k, bits)
+        } else {
+            k as i64
+        };
+        if a::minmax_imm_fits(opc, kv) {
+            let rd = self.def_step(i) as u32;
+            self.emit(a::minmax_imm(sf, opc, rd, rn, kv));
+        } else {
+            let rm = if bits < 32 {
+                self.ext(c.b, signed, bits)
+            } else {
+                self.reg(c.b)
+            } as u32;
+            let rd = self.def_step(i) as u32;
+            self.emit(a::dp2(sf, a::DP2_SMAX + opc, rd, rn, rm));
+        }
+        // A 32-bit operation clears the bits above; a narrower result is clean when zero-extended.
+        self.cr.va.index_mut(i as usize).clean = bits == 32 || bits < 32 && !signed;
+        return true;
+    }
+
+    // FEAT_CSSC: integer select `t` (instruction `i`) of `x` and its negation by the sign of `x`, `x < 0 ?
+    // -x : x` (or `<= 0`, or `x > 0 ? x : -x`, `>= 0`), as ABS of `x`: no comparison, no flags. A narrower
+    // type sign-extends `x` and takes the 32-bit form. Whether it did.
+    fn abs_select(self: &mut Self, i: u32, t: Inst) bool {
+        let bits = type_bits(t.ty, self.cr.ptr);
+        if !self.cpu().cssc || !is_int(t.ty) || bits > 64 || (t.a & (VPARAM | VFLAG)) != 0 || self.cr.lv.conj[t.a as usize] != 0 {
+            return false;
+        }
+        let c = self.cr.b().insts[t.a as usize];
+        let mut z: u64 = 1;
+        if c.op != O_ICMP || !self.cr.const_of(c.b, &mut z) || z != 0 || self.cr.vt(c.a) != t.ty {
+            return false;
+        }
+        let below = c.aux == C_SLT || c.aux == C_SLE;
+        if !below && c.aux != C_SGT && c.aux != C_SGE {
+            return false;
+        }
+        let (neg, x) = if below {
+            (t.b, t.c)
+        } else {
+            (t.c, t.b)
+        };
+        let (kind, base) = lv::cs_base(self.cr.b(), neg);
+        if x != c.a || kind != lv::CS_NEG || base != x {
+            return false;
+        }
+        let rn = if bits < 32 {
+            self.ext(x, true, bits)
+        } else {
+            self.reg(x)
+        } as u32;
+        let rd = self.def_step(i) as u32;
+        self.emit(a::dp1(bits == 64, a::DP1_ABS, rd, rn));
+        self.cr.va.index_mut(i as usize).clean = bits == 32;
+        return true;
+    }
+
     // Whether value `y` is negative exactly when `x` is, `x` where so: `y` a select of `x` and a constant
     // at least 0 that it takes only where `x > k` (`k` at least -1) or `x >= k` (`k` at least 0), as a
     // clamp's upper bound.
@@ -6472,6 +6777,9 @@ extend Gen {
             let rx = self.reg(mz) as u32;
             let rd = self.def_step(i) as u32;
             self.emit(a::logic_reg(bits == 64, 0, true, rd, rx, rx, 2, bits - 1));
+            return true;
+        }
+        if self.min_max(i, t) || self.abs_select(i, t) {
             return true;
         }
         let cx = self.cr.vx(t.a);
@@ -6733,7 +7041,7 @@ extend Gen {
         };
         if op == O_ALOAD {
             let rd = self.def_step(i) as u32;
-            if ord == MO_ACQUIRE && unsafe (*self.pkg).cpu_of(self.cr.b()).rcpc {
+            if ord == MO_ACQUIRE && self.cpu().rcpc {
                 self.emit(a::ldapr(size, rd, rp));
             } else if acq {
                 self.emit(a::ldar(size, true, rd, rp));
@@ -6756,7 +7064,7 @@ extend Gen {
             let rv = self.reg(t.b) as u32;
             // One instruction with LSE, which reads its operands before it writes: a dying one's register.
             let rd = self.def_step(i) as u32;
-            if !unsafe (*self.pkg).cpu_of(self.cr.b()).lse {
+            if !self.cpu().lse {
                 self.llsc_rmw(size, r, acq, rel, rv, rd, rp);
                 return true;
             }
@@ -6798,7 +7106,7 @@ extend Gen {
         } else {
             self.def(i) as u32
         };
-        if unsafe (*self.pkg).cpu_of(self.cr.b()).lse {
+        if self.cpu().lse {
             self.emit(a::mov_reg(true, a::IP0, re));
             self.emit(a::cas(size, acq2, rel2, a::IP0, rn, rp));
             self.cmp_old(size, re);
@@ -7803,7 +8111,7 @@ extend Gen {
         let b = self.cr.b();
         if t.op == O_CALL && self.intrinsic(t.a).len() != 0 {
             let gp: [u8; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
-            ab::intrinsic_layout(b, t.b, self.cr.ptr, gp[0..8], 0, &mut self.cr.lay);
+            ab::intrinsic_layout(b, t.b, self.cr.ptr, gp[0..8], gp[0..2], &mut self.cr.lay);
             return;
         }
         let q = self.lay_index(t);
@@ -8875,8 +9183,7 @@ extend Gen {
             } else {
                 // The lowest set lane of the mask: its trailing zeros.
                 let r = self.reg(t.b) as u32;
-                self.emit(a::dp1(true, a::DP1_RBIT, 0, r));
-                self.emit(a::dp1(true, a::DP1_CLZ, 0, 0));
+                self.ctz64(0, r);
                 self.lane_panic_call(m);
             }
             return true;
@@ -8953,6 +9260,36 @@ extend Gen {
         return self.cs.sym(self.cr.obj(), text);
     }
 
+    // Whether the body turns PSTATE.DIT on while it runs: a constant-time body (`Body.ct`, not naked) on a
+    // target whose CPUs may have FEAT_DIT (`Package.dit`).
+    const fn dit_on(self: &Self) bool {
+        let b = self.cr.b();
+        return unsafe (*self.pkg).dit != tgt::DIT_NONE && b.ct && !b.naked;
+    }
+
+    // Where only some CPUs have FEAT_DIT (`tgt::DIT_HWCAP`), the start-up's byte `__sc_dit` into IP0 and a
+    // branch past the DIT code when it is 0, whose word `dit_patch` sets; NONE elsewhere.
+    fn dit_supported(self: &mut Self) u32 {
+        if unsafe (*self.pkg).dit != tgt::DIT_HWCAP {
+            return NONE;
+        }
+        let os = self.cr.obj().sym("__sc_dit");
+        self.reloc(a::R_GOT_PAGE21, os, 0);
+        self.emit(a::adr(true, a::IP0, 0));
+        self.reloc(a::R_GOT_PAGEOFF12, os, 0);
+        self.emit(a::ldst_uimm(a::M_X, true, a::IP0, a::IP0, 0));
+        self.emit(a::ldst_uimm(a::M_B, true, a::IP0, a::IP0, 0));
+        self.emit(0);
+        return self.code.len() as u32 - 1;
+    }
+
+    // The branch of `dit_supported` at word `at` (NONE: none) to the code's end.
+    const fn dit_patch(self: &mut Self, at: u32) {
+        if at != NONE {
+            self.code[at as usize] = a::cbz(false, false, a::IP0, 4 * (self.code.len() as u32 - at) as i32);
+        }
+    }
+
     // The stack guard's value into `r`: `__stack_chk_guard`, through its address slot.
     fn guard(self: &mut Self, r: u8) {
         let os = self.cr.obj().sym("__stack_chk_guard");
@@ -9005,6 +9342,48 @@ extend Gen {
     // ---- Prologue, epilogue and output ----
 
     // Frame the body's code and define function symbol `s` with it.
+    // The stub under function name `nm` (flags `fl`) in section `sec`: from the highest level of
+    // `stub_levels` down, a branch to that level's copy (`<nm>.l<k>`) when the byte `__sc_simd_lv` (in
+    // x16, free at a call) is at least the level, else to the body without them (`<nm>.base`, object
+    // symbol `base`; the writer may give each function its own section, so branches and not the next
+    // bytes).
+    fn level_entry(self: &mut Self, o: &mut ob::Obj, sec: u8, nm: str, fl: u8, base: u32) {
+        let p = unsafe &*self.pkg;
+        let lv = o.sym("__sc_simd_lv");
+        let mut w = Vector::<u32>::new();
+        let mut rl = Vector::<CRel>::new();
+        // Through its GOT slot where another object may interpose it (`got_global`).
+        if self.elf && p.pic {
+            rl.push(CRel { at: 0, kind: a::R_GOT_PAGE21, sym: lv, addend: 0 });
+            w.push(a::adr(true, a::IP0, 0));
+            rl.push(CRel { at: 1, kind: a::R_GOT_PAGEOFF12, sym: lv, addend: 0 });
+            w.push(a::ldst_uimm(a::M_X, true, a::IP0, a::IP0, 0));
+        } else {
+            rl.push(CRel { at: 0, kind: a::R_PAGE21, sym: lv, addend: 0 });
+            w.push(a::adr(true, a::IP0, 0));
+            rl.push(CRel { at: 1, kind: a::R_PAGEOFF12, sym: lv, addend: 0 });
+            w.push(a::add_imm(true, a::IP0, a::IP0, 0));
+        }
+        w.push(a::ldst_uimm(a::M_B, true, a::IP0, a::IP0, 0));
+        let mut q = self.stub_levels.len();
+        while q > 0 {
+            q -= 1;
+            let k = self.stub_levels[q];
+            let cp = o.sym(format("{}.l{}", nm, k).as_str());
+            w.push(a::cmp_imm(false, a::IP0, k));
+            w.push(a::bcond(a::LO, 8));
+            rl.push(CRel { at: w.len() as u32, kind: a::R_BRANCH26, sym: cp, addend: 0 });
+            w.push(a::b(0));
+        }
+        rl.push(CRel { at: w.len() as u32, kind: a::R_BRANCH26, sym: base, addend: 0 });
+        w.push(a::b(0));
+        let at = o.define(o.sym(nm), sec, 2, w.len() as u64 * 4, fl);
+        o.put_words(sec, &w);
+        for r in 0..rl.len() {
+            o.reloc(sec, rl[r].kind, at as u32 + rl[r].at * 4, rl[r].sym, rl[r].addend);
+        }
+    }
+
     fn finish(self: &mut Self, s: u32) bool {
         // A last branch to the epilogue falls through instead, and so does the one before it when the
         // block between held only that branch: one step per branch.
@@ -9102,6 +9481,14 @@ extend Gen {
             pro.len() as u32
         };
         let body_n = self.code.len() as u32;
+        // DIT back to its value at the entry: off unless it was on.
+        if self.dit >= 0 {
+            let skip = self.dit_supported();
+            self.mem(a::M_X, true, a::IP0 as u8, a::SP, self.dit);
+            self.emit(a::tbz(true, a::IP0, 24, 8));
+            self.emit(MSR_DIT_0);
+            self.dit_patch(skip);
+        }
         // The canary's check: on a mismatch `__stack_chk_fail`, which does not return.
         if self.canary >= 0 {
             self.mem(a::M_X, true, a::IP0 as u8, a::SP, self.canary);
@@ -9317,13 +9704,23 @@ extend Gen {
         let p = unsafe &*self.pkg;
         let ps = p.syms[s as usize];
         let o = self.cr.obj();
-        let k2 = o.sym(p.spell(ps.name));
+        let nm = p.spell(ps.name);
+        let k2 = if self.copy_k != 0 {
+            o.sym(format("{}.l{}", nm, self.copy_k).as_str())
+        } else if self.stub {
+            o.sym(format("{}.base", nm).as_str())
+        } else {
+            o.sym(nm)
+        };
         let size = (pl + self.code.len() as u32 + elen + stubs.len() as u32) * 4;
         let sec = place::text_section(o, p, ps, self.cold_text());
         if sec == ob::NOSEC {
             return self.cr.refuse("too many sections");
         }
-        let fl = place::func_flags(ps, !self.local, true);
+        let fl = place::func_flags(ps, !self.local && self.copy_k == 0 && !self.stub, true);
+        if self.stub {
+            self.level_entry(o, sec, nm, place::func_flags(ps, !self.local, true), k2);
+        }
         let at = o.define(k2, sec, 2, size, fl);
         if !sw {
             o.put_words(sec, &pro);
@@ -10069,6 +10466,67 @@ extend Gen {
         ) == t.ty;
     }
 
+    // Vector `v` in a register: a load folded into its reader (`lv::FOLD_LD3`) loads into `scratch`.
+    fn operand_in(self: &mut Self, v: Value, scratch: u8) u8 {
+        if (v & (VPARAM | VFLAG)) == 0 && self.cr.lv.pfold[v as usize] && self.cr.b().insts[v as usize].op == O_LOAD {
+            let l = self.cr.b().insts[v as usize];
+            let (base, off) = self.addr(l.a, l.c as i32);
+            self.mem(mkind(l.ty, true), true, scratch, base, off);
+            return scratch;
+        }
+        return self.vec_use(v, scratch);
+    }
+
+    // Whether vector register `r` may take a part of `ld3`'s group: scratch v30 and v31, or an allocatable
+    // one the instruction does not use whose value, if any, may move to its home.
+    const fn ld3_free(self: &Self, r: u8) bool {
+        if r == V0 + 30 || r == V0 + 31 {
+            return true;
+        }
+        let x = self.cr.owner[r as usize];
+        return (valloc() & ~(self.cr.lock | self.cr.tmps | self.cr.fixed_busy) & bit(r)) != 0 && (x == NONE || self.cr.va[x as usize].home != H_FIXED);
+    }
+
+    // Shuffle `i` (`t`) of a group of three (`lv::Live::ld3_field`): LD3 of the group into v29 to v31, or
+    // v30, v31, v0 (a list wraps past v31), then its field into the result; with neither free, `tbl_lanes`
+    // (its folded loads loaded one at a time). The shuffle reads the memory: no write since the loads.
+    fn ld3(self: &mut Self, i: u32, t: Inst) {
+        let f = self.cr.lv.ld3_field(self.cr.b(), i);
+        let lo = if self.ld3_free(V0 + 29) {
+            29u32
+        } else if self.ld3_free(V0) {
+            30u32
+        } else {
+            NONE
+        };
+        let b = self.cr.b();
+        if lo == NONE {
+            let ops: [Value; 4] = [b.pool[t.a as usize], b.pool[(t.a + 1) as usize], b.pool[(t.a + 2) as usize], VNONE];
+            self.tbl_lanes(i, t, &ops);
+            return;
+        }
+        let other = ast::pick(lo == 29, V0 + 29, V0);
+        self.evict(other);
+        self.cr.tmps |= bit(other);
+        let l0 = b.insts[b.pool[t.a as usize] as usize];
+        let (base, off) = self.addr(l0.a, l0.c as i32);
+        let rp = if base == a::SP || base == a::FP || off != 0 {
+            self.add_off(a::IP1 as u8, base, off);
+            a::IP1
+        } else {
+            base
+        };
+        let nb = type_bytes(t.ty, 8);
+        let q = nb == 16;
+        let size = (nb / lanes(t.ty)).trailing_zeros() as u32;
+        self.emit(0x0C404000 | a::on(q, 1u32 << 30) | size << 10 | rp << 5 | lo);
+        let rd = (self.def_step(i) - V0) as u32;
+        let rf = (lo + f) % 32;
+        if rd != rf {
+            self.emit(0x0EA01C00 | a::on(q, 1u32 << 30) | rf << 16 | rf << 5 | rd);
+        }
+    }
+
     // Shuffle `t` of vectors `ops` into vector `i` (`tbl_shuffle`): per operand a table of the bytes it gives,
     // 0xFF where another gives them, into v30; TBL of the first, TBX of each other into a temporary (no
     // operand's register), which then moves into the result.
@@ -10092,7 +10550,7 @@ extend Gen {
                     w[(at / 8) as usize] = w[(at / 8) as usize] | byte << (at % 8 * 8) as u64;
                 }
             }
-            let ro = self.vec_use(ops[o as usize], V0 + 31) - V0;
+            let ro = self.operand_in(ops[o as usize], V0 + 31) - V0;
             if q {
                 let k = self.const_sym(w[0], w[1]);
                 self.reloc(a::R_PAGE21, k, 0);
@@ -10203,6 +10661,49 @@ extend Gen {
             for j in 0..g {
                 self.ld_lane(y, t.b, k * g + j, lane_type(nt), false, false);
                 self.emit(a::addsub_reg(true, 0, false, x, x, y, 0, 0));
+            }
+            self.st_lane(x, d, k, lt, true);
+        }
+    }
+
+    // Whether `O_VDOT` `t` sums bytes' products into 4-byte lanes of a vector in a v register where the
+    // processor has FEAT_DotProd (`Cpu.vec_dot`), which `vdot` computes there.
+    const fn dot_reg(self: &Self, t: Inst) bool {
+        let sh = ast::pick((t.aux & DOT_SIGNED) != 0, 8u32, 0u32);
+        return t.op == O_VDOT && in_vreg(t.ty) && type_bytes(lane_type(t.ty), 8) == 4 && type_bytes(
+            lane_type(self.cr.vt(t.b)),
+            8,
+        ) == 1 && (self.cpu().vec_dot >> sh & 1) != 0;
+    }
+
+    // Dot product `t` (`O_VDOT`) into vector `i`: SDOT or UDOT over the accumulator (`dot_reg`); else each
+    // lane's products, extended by their signedness.
+    fn vdot(self: &mut Self, i: u32, t: Inst) {
+        let nt = self.cr.vt(t.b);
+        let sg = (t.aux & DOT_SIGNED) != 0;
+        if self.dot_reg(t) {
+            let q = a::on(type_bytes(t.ty, 8) == 16, 1u32 << 30);
+            let rn = self.vec_use(t.b, V0 + 30);
+            let rm = self.vec_use(t.c, V0 + 31);
+            self.accumulate(0x0E809400u32 | q | a::on(!sg, 1u32 << 29), i, t.a, rn, rm);
+            return;
+        }
+        self.sync(t.a);
+        self.sync(t.b);
+        self.sync(t.c);
+        let d = self.cr.mdef(i);
+        let lt = lane_type(t.ty);
+        let n = lanes(t.ty);
+        let g = lanes(nt) / n;
+        let x = self.tmp(false);
+        let y = self.tmp(false);
+        let z = self.tmp(false);
+        for k in 0..n {
+            self.ld_lane(x, t.a, k, lt, false, true);
+            for j in 0..g {
+                self.ld_lane(y, t.b, k * g + j, lane_type(nt), sg, false);
+                self.ld_lane(z, t.c, k * g + j, lane_type(nt), sg, false);
+                self.emit(a::madd(true, false, x, y, z, x));
             }
             self.st_lane(x, d, k, lt, true);
         }
@@ -10341,6 +10842,21 @@ extend Gen {
     // each lane's bits.
     fn vsel(self: &mut Self, i: u32, t: Inst) {
         let nb = type_bytes(t.ty, 8);
+        let sz = type_bytes(lane_type(t.ty), 8).trailing_zeros() as u32;
+        let folded = (t.a & (VPARAM | VFLAG)) == 0 && self.cr.lv.pfold[t.a as usize];
+        if folded || in_vreg(t.ty) && self.holds_pred(t.a, sz) {
+            // The lanes p0 holds since a masked access of the block (`masked_pred`; for a folded lane
+            // comparison, `lv::Live::pred_sels`, made again after a call): SVE's SEL.
+            if folded && !self.holds_pred(t.a, sz) {
+                let c = self.cr.b().insts[t.a as usize];
+                self.set_pred(c.aux, c.a, c.b, sz, lanes(t.ty));
+            }
+            let rn = self.vec_use(t.b, V0 + 30) as u32 - V0 as u32;
+            let rm = self.vec_use(t.c, V0 + 31) as u32 - V0 as u32;
+            let rd = self.def_step(i) as u32 - V0 as u32;
+            self.emit(a::sve_sel(sz, rd, 0, rn, rm));
+            return;
+        }
         if in_vreg(t.ty) {
             self.neon_reg(a::v3op(false, a::V3_EOR, 1, 0, 0, 0), i, t.b, t.c, t.a, nb);
             return;
@@ -10973,6 +11489,9 @@ extend Gen {
 
     // A portable vector operation (`O_VOP`).
     fn vop(self: &mut Self, i: u32, t: Inst) bool {
+        if self.cr.lv.pfold[i as usize] {
+            return true; // the sum of a lane mask's bits its masked accesses read (`lv::FOLD_PRED`)
+        }
         let code = (t.aux & VOP_CODE) as u32;
         let sg = (t.aux & VOP_SIGNED) != 0;
         let dsg = (t.aux & VOP_DSIGNED) != 0;
@@ -11013,6 +11532,10 @@ extend Gen {
             self.emit(
                 0x2E000000 | a::on(nb == 16, 1u32 << 30) | (ry - V0) as u32 << 16 | slide << 11 | (rx - V0) as u32 << 5 | (rd - V0) as u32,
             );
+            return true;
+        }
+        if self.cr.lv.ld3_field(self.cr.b(), i) != NONE {
+            self.ld3(i, t);
             return true;
         }
         if self.tbl_shuffle(t) {
@@ -11461,6 +11984,7 @@ extend Gen {
     // result lane (of `rlt`, signed `rsg`) in `x`; a lane that traps sets `fr`.
     fn int_rule(self: &mut Self, c: u8, lb: u32, sg: bool, rlt: u8, rsg: bool, x: u8, y: u8, z: u8, wr: u8, fr: u8) {
         let lt_c = ast::pick(sg, a::LT, a::LO);
+        let cssc = self.cpu().cssc;
         if c == core::SIMD_WRAP_ADD || c == core::SIMD_WRAP_SUB || c == core::SIMD_WRAP_MUL {
             let op = if c == core::SIMD_WRAP_ADD {
                 O_ADD
@@ -11507,6 +12031,10 @@ extend Gen {
             }
             self.emit(a::cmp_imm(true, wr, 0));
             self.emit(a::csel(true, 0, 0, x, z, x, a::NE));
+        } else if (c == core::SIMD_MIN || c == core::SIMD_MAX) && cssc {
+            // The lanes are extended to 64 bits by their signedness.
+            let op = ast::pick(c == core::SIMD_MIN, a::DP2_SMIN, a::DP2_SMAX) + ast::pick(sg, 0u32, 1u32);
+            self.emit(a::dp2(true, op, x, x, y));
         } else if c == core::SIMD_MIN {
             self.emit(a::addsub_reg(true, 1, true, a::ZR, x, y, 0, 0));
             self.emit(a::csel(true, 0, 0, x, x, y, lt_c));
@@ -11520,8 +12048,12 @@ extend Gen {
                 self.emit(a::addsub_reg(true, 1, true, a::ZR, x, z, 0, 0));
                 self.emit(a::csel(true, 0, 1, fr, fr, fr, a::NE));
             }
-            self.emit(a::cmp_imm(true, x, 0));
-            self.emit(a::csel(true, 1, 1, x, x, x, a::GE));
+            if cssc {
+                self.emit(a::dp1(true, a::DP1_ABS, x, x));
+            } else {
+                self.emit(a::cmp_imm(true, x, 0));
+                self.emit(a::csel(true, 1, 1, x, x, x, a::GE));
+            }
         } else if c == core::SIMD_ABS_DIFF {
             self.emit(a::addsub_reg(true, 1, false, z, x, y, 0, 0));
             self.emit(a::addsub_reg(true, 1, false, wr, y, x, 0, 0));
@@ -11536,13 +12068,9 @@ extend Gen {
             if lb < 64 {
                 self.emit(a::logic_imm(true, 1, x, x, a::logical_imm(1u64 << lb as u64, true)));
             }
-            self.emit(a::dp1(true, a::DP1_RBIT, x, x));
-            self.emit(a::dp1(true, a::DP1_CLZ, x, x));
+            self.ctz64(x, x);
         } else if c == core::SIMD_POPCNT {
-            self.emit(a::fmov_gv(true, true, 30, x));
-            self.emit(a::cnt8b(30, 30));
-            self.emit(a::addv8b(30, 30));
-            self.emit(a::fmov_gv(false, false, x, 30));
+            self.popcnt64(x, x);
         } else if c == core::SIMD_ROTL || c == core::SIMD_ROTR {
             // (u << k | u >> (lb - k) % lb), or the reverse: the store keeps the lane's bits.
             self.emit(a::logic_imm(true, 0, y, y, a::logical_imm(lb - 1, true)));
@@ -11951,6 +12479,10 @@ extend Gen {
     // per lane the mask sets (each without a test for a constant mask), the lane's bytes through a
     // general register and INS or UMOV; lane 0 by LD1 or ST1 of one lane at the pointer.
     fn masked_in_reg(self: &mut Self, i: u32, store: bool, ops: &[Value; 4], tys: &[u8; 4]) {
+        if (ops[1] & (VPARAM | VFLAG)) == 0 && self.cr.lv.pfold[ops[1] as usize] {
+            self.masked_pred(i, store, ops, tys);
+            return;
+        }
         let vt = tys[2];
         let lt = lane_type(vt);
         let eb = type_bytes(lt, 8);
@@ -12002,6 +12534,43 @@ extend Gen {
             if !known {
                 self.here(w0);
             }
+        }
+    }
+
+    // Masked load (into vector `i`) or `store` through a pointer whose mask an SVE predicate governs
+    // (`lv::FOLD_PRED`, `pred_mask`): PTRUE of the vector's lanes into p7, then into p0 the lane comparison
+    // whose bits the mask is (`SVE_CMP`), or CMPNE of the lane mask's lanes, unless p0 holds them already
+    // (`pv`); then LD1 (a lane mask's fallback lanes where it is 0, by BIF) or ST1.
+    fn masked_pred(self: &mut Self, i: u32, store: bool, ops: &[Value; 4], tys: &[u8; 4]) {
+        let vt = tys[2];
+        let nb = type_bytes(vt, 8);
+        let sz = type_bytes(lane_type(vt), 8).trailing_zeros() as u32;
+        let n = lanes(vt);
+        let (c, v, w) = pred_mask(self.cr.b(), self.cr.b().insts[i as usize]);
+        let rm = self.vec_use(v, V0 + 30) as u32 - V0 as u32;
+        let p = self.reg(ops[0]) as u32;
+        if self.pv != ops[1] || self.psz != sz || self.calls_in(self.pat, self.code.len() as u32) {
+            self.set_pred(c, v, w, sz, n);
+            self.pv = ops[1];
+        }
+        if store {
+            let rv = self.vec_use(ops[2], V0 + 31);
+            self.emit(a::sve_st1(sz, rv - V0, 0, p));
+            return;
+        }
+        if zero_vec(self.cr.b(), ops[2]) {
+            let rd = self.vec_def(i);
+            self.emit(a::sve_ld1(sz, rd - V0, 0, p));
+            return;
+        }
+        let rf = self.vec_use(ops[2], V0 + 31);
+        let x = self.tmp(true);
+        self.emit(a::sve_ld1(sz, x - V0, 0, p));
+        // BIF x, rf, rm: rf's lanes where rm's are 0.
+        self.emit(0x2EE01C00 | a::on(nb == 16, 1u32 << 30) | rm << 16 | (rf - V0) as u32 << 5 | (x - V0) as u32);
+        let rd = self.vec_def(i);
+        if rd != x {
+            self.emit(a::vmov(nb == 16, rd - V0, x - V0));
         }
     }
 
@@ -12104,10 +12673,7 @@ extend Gen {
         }
         if cs {
             // The packed lanes must fit from start.
-            self.emit(a::fmov_gv(true, true, 30, act));
-            self.emit(a::cnt8b(30, 30));
-            self.emit(a::addv8b(30, 30));
-            self.emit(a::fmov_gv(false, false, x, 30));
+            self.popcnt64(x, act);
             let w0 = self.code.len() as u32;
             self.emit(a::addsub_reg(true, 1, true, ix, len, st, 0, 0));
             self.emit(a::bcond(a::LO, 0));
@@ -12301,6 +12867,10 @@ extend Gen {
                 self.emit(a::addsub_reg(true, 0, false, acc, acc, x, 0, 0));
             } else if mul {
                 self.emit(a::mul(true, acc, acc, x));
+            } else if self.cpu().cssc {
+                // FEAT_CSSC: the lanes are extended to 64 bits by their signedness.
+                let op = ast::pick(c == core::SIMD_REDUCE_MIN, a::DP2_SMIN, a::DP2_SMAX) + ast::pick(sg, 0u32, 1u32);
+                self.emit(a::dp2(true, op, acc, acc, x));
             } else {
                 // min takes a lane below the accumulator, max one not below: both stay extended.
                 self.emit(a::addsub_reg(true, 1, true, a::ZR, x, acc, 0, 0));
@@ -12773,6 +13343,25 @@ extend Gen {
         }
         if s == SYS_SPIN {
             self.emit(a::ISB);
+            return true;
+        }
+        if s == SYS_SVE {
+            // The start-up's byte `__sc_sve`: through its address slot where another object may interpose
+            // it (`got_global`), else at its page offset.
+            let rd = self.def(i) as u32;
+            let os = self.cr.obj().sym("__sc_sve");
+            let got = self.elf && unsafe (*self.pkg).pic;
+            self.reloc(ast::pick(got, a::R_GOT_PAGE21, a::R_PAGE21), os, 0);
+            self.emit(a::adr(true, rd, 0));
+            if got {
+                self.reloc(a::R_GOT_PAGEOFF12, os, 0);
+                self.emit(a::ldst_uimm(a::M_X, true, rd, rd, 0));
+            } else {
+                self.reloc(a::R_PAGEOFF12, os, 0);
+            }
+            // LDRB zero-extends.
+            self.emit(a::ldst_uimm(a::M_B, true, rd, rd, 0));
+            self.cr.va.index_mut(i as usize).clean = true;
             return true;
         }
         if s == SYS_CYCLES || s == SYS_SVL {

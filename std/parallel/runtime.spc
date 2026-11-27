@@ -247,6 +247,7 @@ static_assert(REG_SEG_SIZE * REG_MAX_SEGS >= 1000000, "the registry must hold a 
 struct Registry {
     pub segs: Vector<Vector<TaskSlot>>, // REG_MAX_SEGS segments reserved with the registry: neither moves
     pub len: usize, // slots handed out so far (monotonic bump; retired slots recycle via free_head)
+    pub max: usize, // slots handed out at most (`reg_limit`)
     pub free_head: i64,
     pub spin: i32, // guards slot allocation, retirement, and scans
 }
@@ -692,12 +693,31 @@ fn claim(co: *mut Coroutine, token: u32, reason: u32) bool {
 // published before the pool is: every spawn and every task reads it after acquiring the started state, so
 // those reads are plain. A diagnostic or a cancel from a thread that never started the pool reads it
 // through `reg_load`, which may see null.
+// The slots the registry hands out at most: REG_SEG_SIZE * REG_MAX_SEGS, or fewer by `SC_TASK_LIMIT`, which
+// lets a test reach a full registry with a few live tasks.
+fn reg_limit() usize {
+    let full = REG_SEG_SIZE * REG_MAX_SEGS;
+    let p = stdlib::get_env("SC_TASK_LIMIT");
+    if p.is_none() {
+        return full;
+    }
+    return switch p.unwrap().as_str().parse_u64() {
+        Some(v) => if v < full as u64 {
+            v as usize
+        } else {
+            full
+        },
+        None => full,
+    };
+}
+
 fn reg_init() {
     let mut g = Global {};
     let r = (unsafe g.alloc(sizeof(Registry), alignof(Registry))) as *mut Registry;
     unsafe r[0] = Registry {
         segs: Vector::<Vector<TaskSlot>>::with_capacity(REG_MAX_SEGS),
         len: 0,
+        max: reg_limit(),
         free_head: -1,
         spin: 0,
     };
@@ -738,8 +758,8 @@ fn reg_assign(co: *mut Coroutine) bool
         unsafe (*r).free_head = unsafe (*sl0).next_free;
     } else {
         idx = unsafe (*r).len;
-        if idx >= REG_SEG_SIZE * REG_MAX_SEGS {
-            // Registry exhausted: one slot per live block, a million of them.
+        if idx >= REG_SEG_SIZE * REG_MAX_SEGS || idx >= unsafe (*r).max {
+            // Registry exhausted: one slot per live block, a million of them (`reg_limit`).
             unsafe sc_runtime::sc_rt_spin_unlock(&mut (*r).spin);
             return false;
         }

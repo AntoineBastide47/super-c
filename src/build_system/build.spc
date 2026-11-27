@@ -1010,6 +1010,7 @@ fn emit_closure(
     if prelude_stage(&mut p, &mut cirv, cx.std_dir, root, cx.target, jobs, &cdir) {
         // After the prelude stage, which may swap in a saved prelude package.
         p.std_internals = m.std_internals;
+        p.prove_steps = m.prove_steps;
         p.lib_build = m.lib_name.len() != 0 && root == m.lib_root.as_str();
         p.load_user(root, cx.std_dir, cx.target);
     }
@@ -1896,6 +1897,10 @@ pub(package) fn link_head(a: &mut Vector<String>, out: str, objs: &Vector<String
     let gc = mf::link_gc(cg, tgt::obj_of(target).name == "macho");
     if gc.len() != 0 {
         push_arg(a, gc);
+    }
+    let fold = mf::link_fold(cg);
+    if fold.len() != 0 {
+        push_arg(a, fold);
     }
 }
 

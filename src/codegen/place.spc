@@ -384,7 +384,7 @@ pub(package) fn osym_of(p: &Package, b: &Body, o: &mut ob::Obj, osym: &mut Osyms
         let ps = p.syms[g];
         let nm0 = p.spell(ps.name);
         // `__sc_x_<name>` is a C library name's alias (a macro of a scoped extern header).
-        let nm = if ps.def == NONE && nm0.starts_with("__sc_x_") {
+        let nm = if !p.defines(g as u32) && nm0.starts_with("__sc_x_") {
             nm0.slice(7, nm0.len())
         } else {
             nm0
@@ -1769,5 +1769,215 @@ extend Core {
             self.sv_home[x as usize] = H_SLOT;
         }
         return self.sv_off[x as usize];
+    }
+}
+
+/// A body of at most this many instructions counts as one loop (`copy_levels`).
+pub(package) const COPY_SMALL: usize = 64;
+
+/// A body gets a run-time copy for a level when the level's flags save at least one instruction in this
+/// many of one of its loops (`copy_levels`): the copy's size against the time it saves.
+pub(package) const COPY_GAIN: usize = 8;
+
+/// The levels (1-based, `Package.copy_flags`) body `b` of `p` gets a run-time copy for, lowest first, into
+/// `out`: each level whose flags beyond the last copy's (the body's own at first) save instructions
+/// (`differs` of an instruction and those flags: the instructions it saves) where it pays: one in
+/// COPY_GAIN of the body, when it has at most COPY_SMALL instructions, or of one of its loops (`loops_of`;
+/// a copy of a large body for a change outside its loops, or rare in them, costs its size for little
+/// time). None for a naked body, or one that reads the level byte `__sc_simd_lv` itself (a
+/// function with copies of its vector code picks one in its prologue).
+pub(package) fn copy_levels(p: &Package, b: &Body, differs: fn(&Body, Inst, u32) u32, out: &mut Vector<u32>) {
+    out.truncate(0);
+    if p.copy_flags.len() == 0 || b.naked {
+        return;
+    }
+    for i in 0..b.insts.len() {
+        let t = b.insts[i];
+        if t.op == O_SYMADDR && p.spell(p.syms[b.syms[t.a as usize] as usize].name) == "__sc_simd_lv" {
+            return;
+        }
+    }
+    let small = b.insts.len() <= COPY_SMALL;
+    // The loops' blocks, or one set of every block in a small body; per block the instructions the level
+    // saves.
+    let mut blocks = Vector::<u32>::new();
+    let mut ends = Vector::<u32>::new();
+    if small {
+        for q in 0..b.blocks.len() {
+            blocks.push(q as u32);
+        }
+        ends.push(blocks.len() as u32);
+    } else {
+        loops_of(b, &mut blocks, &mut ends);
+    }
+    let mut hits = Vector::<usize>::new();
+    let mut have = p.cpu_of(b).flags();
+    for k in 0..p.copy_flags.len() {
+        let add = p.copy_flags[k] & ~have;
+        if add == 0 || ends.len() == 0 {
+            continue;
+        }
+        fill(&mut hits, b.blocks.len(), 0usize);
+        for q in 0..b.blocks.len() {
+            let bk = b.blocks[q];
+            for i in bk.start..bk.start + bk.len {
+                hits[q] += differs(b, b.insts[i as usize], add) as usize;
+            }
+        }
+        let mut pays = false;
+        let mut from: usize = 0;
+        for l in 0..ends.len() {
+            let mut size: usize = 0;
+            let mut h: usize = 0;
+            for x in from..ends[l] as usize {
+                size += b.blocks[blocks[x] as usize].len as usize;
+                h += hits[blocks[x] as usize];
+            }
+            pays = pays || h != 0 && size <= COPY_GAIN * h;
+            from = ends[l] as usize;
+        }
+        if pays {
+            out.push(k as u32 + 1);
+            have |= p.copy_flags[k];
+        }
+    }
+}
+
+/// The loops of `b`, nested ones each on its own, into `blocks` and `ends`: loop `l` is the blocks
+/// `blocks[ends[l - 1]..ends[l]]` (from 0 for the first). A loop is a strongly connected set of blocks
+/// with more than one block or an edge to itself; the loops inside it are those of the set without its
+/// header, the block the search entered it by (Tarjan's algorithm without recursion, then again on each
+/// loop without its header: each pass takes each block and edge of the sets it searches once, and a block
+/// is in at most as many sets as loops hold it).
+pub(package) fn loops_of(b: &Body, blocks: &mut Vector<u32>, ends: &mut Vector<u32>) {
+    blocks.truncate(0);
+    ends.truncate(0);
+    let n = b.blocks.len();
+    let mut succ = Vector::<Vector<u32>>::new();
+    let mut eds = Vector::<u32>::new();
+    for k in 0..n {
+        succ.push(Vector::<u32>::new());
+        let bk = b.blocks[k];
+        if bk.len == 0 {
+            continue;
+        }
+        b.succ_edges(b.insts[(bk.start + bk.len - 1) as usize], &mut eds);
+        for e in 0..eds.len() {
+            succ[k].push(b.edge_target(eds[e]));
+        }
+    }
+    // The set each block is searched in (NONE: in none), the sets to search as ranges of `members`.
+    let mut set = Vector::<u32>::new();
+    let mut members = Vector::<u32>::new();
+    let mut todo = Vector::<(u32, u32, u32)>::new();
+    fill(&mut set, n, 0u32);
+    for k in 0..n {
+        members.push(k as u32);
+    }
+    todo.push((0u32, 0u32, n as u32));
+    let mut sets: u32 = 1;
+    let mut index = Vector::<u32>::new();
+    let mut low = Vector::<u32>::new();
+    let mut on = Vector::<bool>::new();
+    let mut next = Vector::<u32>::new();
+    fill(&mut index, n, NONE);
+    fill(&mut low, n, 0u32);
+    fill(&mut on, n, false);
+    fill(&mut next, n, 0u32);
+    let mut stack = Vector::<u32>::new();
+    let mut walk = Vector::<u32>::new();
+    let mut comp = Vector::<u32>::new();
+    let mut t: usize = 0;
+    // Each set is a loop's blocks but its header, or all blocks: at most one set per block and one more.
+    while t < todo.len() {
+        assert(t <= n + 1, "loops_of: a set per header");
+        let (sid, lo, hi) = todo[t];
+        t += 1;
+        for m in lo..hi {
+            let k = members[m as usize] as usize;
+            index[k] = NONE;
+            next[k] = 0;
+        }
+        let mut counter: u32 = 0;
+        for m in lo..hi {
+            let r = members[m as usize] as usize;
+            if index[r] != NONE || set[r] != sid {
+                continue;
+            }
+            index[r] = counter;
+            low[r] = counter;
+            counter += 1;
+            stack.push(r as u32);
+            on[r] = true;
+            walk.push(r as u32);
+            while walk.len() != 0 {
+                let v = walk[walk.len() - 1] as usize;
+                if next[v] as usize < succ[v].len() {
+                    let w = succ[v][next[v] as usize] as usize;
+                    next[v] += 1;
+                    if set[w] != sid {
+                        continue;
+                    }
+                    if index[w] == NONE {
+                        index[w] = counter;
+                        low[w] = counter;
+                        counter += 1;
+                        stack.push(w as u32);
+                        on[w] = true;
+                        walk.push(w as u32);
+                    } else if on[w] && index[w] < low[v] {
+                        low[v] = index[w];
+                    }
+                    continue;
+                }
+                let _ = walk.pop();
+                if walk.len() != 0 {
+                    let u = walk[walk.len() - 1] as usize;
+                    if low[v] < low[u] {
+                        low[u] = low[v];
+                    }
+                }
+                if low[v] != index[v] {
+                    continue;
+                }
+                // A component, the stack's blocks down to `v`, its header.
+                comp.truncate(0);
+                loop {
+                    let x = stack.pop().unwrap();
+                    on[x as usize] = false;
+                    comp.push(x);
+                    if x as usize == v {
+                        break;
+                    }
+                }
+                let mut cyc = comp.len() > 1;
+                for e in 0..succ[v].len() {
+                    cyc = cyc || succ[v][e] as usize == v;
+                }
+                if !cyc {
+                    continue;
+                }
+                for q in 0..comp.len() {
+                    blocks.push(comp[q]);
+                }
+                ends.push(blocks.len() as u32);
+                if comp.len() > 1 {
+                    // In block order: a search of the set enters each inner loop by its first block, its
+                    // header in a layout whose loops start at their headers.
+                    comp.sort();
+                    let start = members.len() as u32;
+                    for q in 0..comp.len() {
+                        if comp[q] as usize != v {
+                            members.push(comp[q]);
+                        }
+                    }
+                    todo.push((sets, start, members.len() as u32));
+                    for q in 0..comp.len() {
+                        set[comp[q] as usize] = ast::pick(comp[q] as usize == v, NONE, sets);
+                    }
+                    sets += 1;
+                }
+            }
+        }
     }
 }

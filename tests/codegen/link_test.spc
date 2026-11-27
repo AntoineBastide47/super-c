@@ -1,5 +1,6 @@
 // The link step: the link record's name, a C static library the own linker links, the import
-// libraries a Windows link takes for their DLLs, and the garbage collection of `-ffunction-sections`.
+// libraries a Windows link takes for their DLLs, the garbage collection of `-ffunction-sections`, and the
+// folding of identical functions.
 import stdlib;
 import build_system::build as bsys;
 import driver::util as dutil;
@@ -298,6 +299,201 @@ fn section_garbage_collection_drops_what_nothing_reaches() {
     assert(wg.len() < wf.len(), "the collected wasm build is smaller");
     let mut wrun = format("wasmtime run \"{}\"", wgp.as_str());
     assert_eq(cli::run_with(wrun.cstr(), null, null, null, ""), 0);
+}
+
+// Two identical functions only called, two identical ones whose addresses a table takes: the link keeps one
+// body of the first pair (`-ffold-functions`, the default from -O1), and the second pair keeps two
+// addresses, which the program compares. The arguments come from memory: a constant one would give each
+// function a copy of its own (`-O2`'s specialization).
+const ICF_MAIN: str = M"(@noinline
+fn icf_twin_a(x: i64) i64 {
+    return x * 977 + 31;
+}
+
+@noinline
+fn icf_twin_b(x: i64) i64 {
+    return x * 977 + 31;
+}
+
+@noinline
+fn icf_taken_a(x: i64) i64 {
+    return x * 613 - 5;
+}
+
+@noinline
+fn icf_taken_b(x: i64) i64 {
+    return x * 613 - 5;
+}
+
+static mut TAKEN: [fn(i64) i64; 2] = [icf_taken_a, icf_taken_b];
+static mut ARGS: [i64; 4] = [2, 3, 1, 2];
+
+fn main() i32 {
+    let a = unsafe TAKEN[0];
+    let b = unsafe TAKEN[1];
+    if a == b {
+        return 1;
+    }
+    let v = unsafe ARGS;
+    return (icf_twin_a(v[0]) + icf_twin_b(v[1]) + a(v[2]) + b(v[3]) - 6776) as i32;
+}
+)";
+
+@test
+fn identical_functions_fold_unless_their_address_is_taken() {
+    let p = cli::proj_new();
+    p.mkfile("main.spc", ICF_MAIN);
+    let exe = format("{}/icf{}", p.dir(), unsafe str::from_cstr(cli::binext()));
+    let a = format("build main.spc -O2 -o \"{}\"", exe.as_str());
+    assert(cli::superc_in(p.dir(), &a).ok(), "the build");
+    let img = loader::read_file(&exe).unwrap();
+    let (mut ta, mut tb, mut ka, mut kb) = (
+        Vector::<u64>::new(),
+        Vector::<u64>::new(),
+        Vector::<u64>::new(),
+        Vector::<u64>::new()
+    );
+    assert(symbol_addrs(&img, "icf_twin_a", &mut ta), "the image has a symbol table");
+    symbol_addrs(&img, "icf_twin_b", &mut tb);
+    symbol_addrs(&img, "icf_taken_a", &mut ka);
+    symbol_addrs(&img, "icf_taken_b", &mut kb);
+    assert(ta.len() == 1 && tb.len() == 1 && ka.len() == 1 && kb.len() == 1, "the image names each function once");
+    assert_eq(ta[0], tb[0]);
+    assert(ka[0] != kb[0], "functions whose addresses are taken keep their own");
+    let mut run = format("\"{}\"", exe.as_str());
+    assert_eq(cli::run_with(run.cstr(), null, null, null, ""), 0);
+    // The wasm linker: its name section names the bodies it keeps.
+    if stdlib::get_env("WASI_SDK_PATH").unwrap_or(String::new()).len() == 0 || cli::on_wasm() {
+        return;
+    }
+    let wp = format("{}/icf.wasm", p.dir());
+    let wa = format("build main.spc -O2 --target=wasm -o \"{}\"", wp.as_str());
+    assert(cli::superc_in(p.dir(), &wa).ok(), "the wasm build");
+    let wb = loader::read_file(&wp).unwrap();
+    assert(has(&wb, "icf_twin_a") != has(&wb, "icf_twin_b"), "one body of the twins stays in wasm");
+    assert(has(&wb, "icf_taken_a") && has(&wb, "icf_taken_b"), "both functions whose addresses are taken stay");
+    let mut wrun = format("wasmtime run \"{}\"", wp.as_str());
+    assert_eq(cli::run_with(wrun.cstr(), null, null, null, ""), 0);
+}
+
+// The addresses of the defined symbols of image `b` (a Mach-O or ELF image: its address; a PE one: its section
+// << 32 | offset) whose names hold `s`, into `out`; false when `b` is none of these or has no symbol table.
+fn symbol_addrs(b: str, s: str, out: &mut Vector<u64>) bool {
+    if le(b, 0, 4) == 0xFEEDFACF {
+        let mut at: usize = 32;
+        for _ in 0..le(b, 16, 4) as usize {
+            if le(b, at, 4) == 2 {
+                let (symoff, nsyms, stroff) = (
+                    le(b, at + 8, 4) as usize,
+                    le(b, at + 12, 4) as usize,
+                    le(b, at + 16, 4) as usize
+                );
+                for k in 0..nsyms {
+                    let y = symoff + 16 * k;
+                    // A symbol defined in a section; no debugger entry.
+                    if (le(b, y + 4, 1) & 0xEE) == 0x0E && cname(b, stroff + le(b, y, 4) as usize).contains(s) {
+                        out.push(le(b, y + 8, 8));
+                    }
+                }
+                return true;
+            }
+            at += le(b, at + 4, 4) as usize;
+        }
+        return false;
+    }
+    if le(b, 0, 4) == 0x464C457F {
+        let (shoff, shsize, shnum) = (le(b, 0x28, 8) as usize, le(b, 0x3A, 2) as usize, le(b, 0x3C, 2) as usize);
+        for k in 0..shnum {
+            let sh = shoff + k * shsize;
+            if le(b, sh + 4, 4) != 2 {
+                continue;
+            }
+            let strs = le(b, shoff + le(b, sh + 0x28, 4) as usize * shsize + 0x18, 8) as usize;
+            let (off, size) = (le(b, sh + 0x18, 8) as usize, le(b, sh + 0x20, 8) as usize);
+            for q in 0..size / 24 {
+                let y = off + 24 * q;
+                if le(b, y + 6, 2) != 0 && cname(b, strs + le(b, y, 4) as usize).contains(s) {
+                    out.push(le(b, y + 8, 8));
+                }
+            }
+            return true;
+        }
+        return false;
+    }
+    if b.len() > 0x40 && le(b, 0, 2) == 0x5A4D {
+        let pe = le(b, 0x3C, 4) as usize;
+        let (symtab, nsym) = (le(b, pe + 12, 4) as usize, le(b, pe + 16, 4) as usize);
+        if symtab == 0 {
+            return false;
+        }
+        let strs = symtab + 18 * nsym;
+        let mut k: usize = 0;
+        // Each step reads a symbol and skips its auxiliary records.
+        while k < nsym {
+            let y = symtab + 18 * k;
+            let name = if le(b, y, 4) == 0 {
+                cname(b, strs + le(b, y + 4, 4) as usize)
+            } else {
+                cname(b.slice(y, y + 8), 0)
+            };
+            if le(b, y + 12, 2) as i16 > 0 && name.contains(s) {
+                out.push(le(b, y + 12, 2) << 32 | le(b, y + 8, 4));
+            }
+            k += 1 + le(b, y + 17, 1) as usize;
+        }
+        return true;
+    }
+    return false;
+}
+
+// The NUL-terminated name at `at` of `b` (to its end when it holds no NUL).
+const fn cname<'a>(b: str<'a>, at: usize) str<'a> {
+    let mut e = at;
+    while e < b.len() && b.byte_at(e) != 0 {
+        e += 1;
+    }
+    return b.slice(at, e);
+}
+
+@test
+fn identical_parts_fold_by_their_targets_classes() {
+    // Parts 0 and 1 call 2 and 3, which call 0 and 1: two classes of two. Part 4 has 0's bytes but calls 5,
+    // which differs from 2; part 6 has 0's bytes and calls but another key; part 7 has 2's bytes but calls
+    // another target than a part.
+    let mut b = Vector::<u8>::new();
+    for c in "AAAABBBBCCCC".bytes() {
+        b.push(c);
+    }
+    let mut ps = Vector::<lu::FoldPart>::new();
+    let parts: [(usize, u64); 8] = [(0, 1), (0, 1), (4, 1), (4, 1), (0, 1), (8, 1), (0, 2), (4, 1)];
+    for k in 0..8usize {
+        ps.push(lu::FoldPart { at: parts[k].0, len: 4, key: parts[k].1, hash: 0, r0: k as u32, rn: 1 });
+    }
+    let calls: [u32; 8] = [2, 3, 0, 1, 5, lu::FOLD_NONE, 2, lu::FOLD_NONE];
+    let mut rs = Vector::<lu::FoldRel>::new();
+    for k in 0..8usize {
+        let tgt = if calls[k] == lu::FOLD_NONE {
+            lu::FOLD_GLOBAL | 7
+        } else {
+            0u64
+        };
+        rs.push(lu::FoldRel { off: 1, kind: 9, part: calls[k], tgt: tgt, val: 0 });
+    }
+    lu::fold_hashes(&mut ps, &b, 1);
+    let into = lu::fold(&ps, &rs, &b);
+    let want: [u32; 8] = [
+        lu::FOLD_NONE,
+        0,
+        lu::FOLD_NONE,
+        2,
+        lu::FOLD_NONE,
+        lu::FOLD_NONE,
+        lu::FOLD_NONE,
+        lu::FOLD_NONE,
+    ];
+    for k in 0..8usize {
+        assert(into[k] == want[k], format("part {} folds into {}, not {}", k, into[k], want[k]).as_str());
+    }
 }
 
 // Whether the bytes `b` hold those of `s`.

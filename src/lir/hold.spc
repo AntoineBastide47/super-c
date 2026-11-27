@@ -136,13 +136,15 @@ pub(package) struct HRef {
 
 extend HRef as Persist {}
 
-// A function of the object: its spelling, walk facts (`HELD_*`), effects (`Sym.fx`), the parameters
+// A function of the object: its spelling, walk facts (`HELD_*`), section (`Sym.sect`, a spelling; NONE for
+// its kind's), effects (`Sym.fx`), the parameters
 // whose memory it may write and those it may let escape (`Sym.esc`), its parameters' byte ranges
 // (`Sym.span`'s entries), direct calls (spellings, in instruction order) and, with HELD_OK, its optimized
 // body, whose symbols are `refs`, whose messages and line files are spellings.
 pub(package) struct HFunc {
     pub(package) name: u32,
     pub(package) flags: u8,
+    pub(package) sect: u32,
     pub(package) fx: u8,
     pub(package) wargs: u64,
     pub(package) esc: u64,
@@ -319,7 +321,16 @@ pub(package) fn record(pk: &mut Package, r: &mut lopt::Run, us: &Units, u: usize
                 sy.cold,
                 HELD_COLD,
                 0u8,
-            ) | ast::pick(sy.always, HELD_ALWAYS, 0u8) | ast::pick(sy.sec, HELD_SEC, 0u8),
+            ) | ast::pick(sy.always, HELD_ALWAYS, 0u8) | ast::pick(sy.sec, HELD_SEC, 0u8) | ast::pick(
+                sy.used,
+                HELD_USED,
+                0u8,
+            ),
+            sect: if sy.sect == NONE {
+                NONE
+            } else {
+                sv.name(sy.sect)
+            },
             fx: sy.fx,
             wargs: r.wargs_of(k),
             esc: sy.esc,
@@ -626,6 +637,9 @@ pub(package) fn add(pk: &mut Package, unit: u32, rec: &Rec) {
             }
         }
         pk.bodies.push(b);
+        if f.sect != NONE {
+            pk.set_section(s, rec.names.at(f.sect as usize).as_str());
+        }
         let y = pk.syms.index_mut(s as usize);
         y.def = pk.bodies.len() as u32 - 1;
         y.unit = unit;
@@ -633,6 +647,7 @@ pub(package) fn add(pk: &mut Package, unit: u32, rec: &Rec) {
         y.cold = (f.flags & HELD_COLD) != 0;
         y.always = (f.flags & HELD_ALWAYS) != 0;
         y.sec = (f.flags & HELD_SEC) != 0;
+        y.used = y.used || (f.flags & HELD_USED) != 0;
         pk.held.syms.push(s);
         pk.held.flags.push(f.flags);
         pk.held.fx.push(f.fx);

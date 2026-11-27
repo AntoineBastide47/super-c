@@ -45,6 +45,7 @@ pub(package) struct Diagnostic {
 pub(package) struct Note {
     pub(package) text: String,
     pub(package) next: u32, // next note of the same diagnostic; NOTE_NONE at the end
+    pub(package) help: bool, // a fix to apply (`= help:`), not a fact about the diagnostic (`= note:`)
 }
 
 /// Diagnostic accumulator for one source buffer. Records stay raw for the whole pipeline; `finalize`
@@ -141,7 +142,9 @@ extend Errors {
         let tb = self.fix_texts.len() as u32;
         for k in 0..o.note_pool.len() {
             let n = o.note_pool.index_mut(k);
-            self.note_pool.push(Note { text: replace(&mut n.text, String::new()), next: note_rebase(n.next, nb) });
+            self.note_pool.push(
+                Note { text: replace(&mut n.text, String::new()), next: note_rebase(n.next, nb), help: n.help },
+            );
         }
         append_diags(&mut self.errors, &mut o.errors, nb);
         append_diags(&mut self.warns, &mut o.warns, nb);
@@ -246,7 +249,7 @@ extend Errors {
             return;
         }
         let id = self.note_pool.len() as u32;
-        self.note_pool.push(Note { text: msg, next: NOTE_NONE });
+        self.note_pool.push(Note { text: msg, next: NOTE_NONE, help: false });
         if self.errors[index].note_head == NOTE_NONE {
             self.errors[index].note_head = id;
         } else {
@@ -254,6 +257,25 @@ extend Errors {
             self.note_pool[t as usize].next = id;
         }
         self.errors[index].note_tail = id;
+    }
+
+    /// Attach a help line (`= help:`, how to fix it) to the most recent warning. Takes ownership of
+    /// `msg`; its later lines print as they are.
+    @cold
+    pub(package) fn warn_help(self: &mut Self, msg: String) {
+        let n = self.warns.len();
+        if n == 0 {
+            return;
+        }
+        let id = self.note_pool.len() as u32;
+        self.note_pool.push(Note { text: msg, next: NOTE_NONE, help: true });
+        if self.warns[n - 1].note_head == NOTE_NONE {
+            self.warns[n - 1].note_head = id;
+        } else {
+            let t = self.warns[n - 1].note_tail;
+            self.note_pool[t as usize].next = id;
+        }
+        self.warns[n - 1].note_tail = id;
     }
 
     /// Attach a note line to the most recent diagnostic. Takes ownership of `msg`.
@@ -498,7 +520,7 @@ fn push_loc_block(out: &mut String, source: str, line_starts: &Vector<u32>, mut 
 }
 
 // Render one record into a pretty source-annotated block: the message, the location block, and the
-// note chain ("\n  = note: <text>" per note, continuation lines unprefixed).
+// note chain ("\n  = note: <text>" per note, "= help:" for a help line, continuation lines unprefixed).
 @cold
 fn render(d: &Diagnostic, source: str, line_starts: &Vector<u32>, file: str, pool: &Vector<Note>, kind: str) String {
     let mut out = String::new();
@@ -509,7 +531,13 @@ fn render(d: &Diagnostic, source: str, line_starts: &Vector<u32>, file: str, poo
     push_loc_block(&mut out, source, line_starts, d.start, d.len, file);
     let mut n = d.note_head;
     while n != NOTE_NONE {
-        out.push_str("\n  = note: ");
+        out.push_str(
+            if pool[n as usize].help {
+                "\n  = help: "
+            } else {
+                "\n  = note: "
+            },
+        );
         out.push_string(&pool[n as usize].text);
         n = pool[n as usize].next;
     }

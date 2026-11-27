@@ -205,7 +205,8 @@ pub(package) const fn cset(sf: bool, rd: u32, cond: u32) u32 {
     return csel(sf, 0, 1, rd, ZR, ZR, invert(cond));
 }
 
-/// Two-source operations: `opc` 2 UDIV, 3 SDIV, 8 LSLV, 9 LSRV, 10 ASRV, 11 RORV.
+/// Two-source operations: `opc` 2 UDIV, 3 SDIV, 8 LSLV, 9 LSRV, 10 ASRV, 11 RORV, and FEAT_CSSC's 24
+/// SMAX, 25 UMAX, 26 SMIN, 27 UMIN.
 pub(package) const fn dp2(sf: bool, opc: u32, rd: u32, rn: u32, rm: u32) u32 {
     return sfb(sf) | 0x1AC00000 | rm << 16 | opc << 10 | rn << 5 | rd;
 }
@@ -216,8 +217,28 @@ pub(package) const DP2_LSLV: u32 = 8;
 pub(package) const DP2_LSRV: u32 = 9;
 pub(package) const DP2_ASRV: u32 = 10;
 pub(package) const DP2_RORV: u32 = 11;
+pub(package) const DP2_SMAX: u32 = 24;
+pub(package) const DP2_UMAX: u32 = 25;
+pub(package) const DP2_SMIN: u32 = 26;
+pub(package) const DP2_UMIN: u32 = 27;
 
-/// One-source operations: `opc` 0 RBIT, 1 REV16, 2 REV (32) or REV32 (64), 3 REV (64), 4 CLZ, 5 CLS.
+/// FEAT_CSSC's minimum or maximum of a register and an 8-bit immediate: `opc` 0 SMAX, 1 UMAX, 2 SMIN,
+/// 3 UMIN; `imm` signed for SMAX and SMIN, unsigned for the others (`minmax_imm_fits`).
+pub(package) const fn minmax_imm(sf: bool, opc: u32, rd: u32, rn: u32, imm: i64) u32 {
+    return sfb(sf) | 0x11C00000 | opc << 18 | (imm as u32 & 0xFF) << 10 | rn << 5 | rd;
+}
+
+/// Whether `imm` fits the immediate of `minmax_imm`'s `opc`.
+pub(package) const fn minmax_imm_fits(opc: u32, imm: i64) bool {
+    return if (opc & 1) == 0 {
+        imm >= -128 && imm <= 127
+    } else {
+        imm >= 0 && imm <= 255
+    };
+}
+
+/// One-source operations: `opc` 0 RBIT, 1 REV16, 2 REV (32) or REV32 (64), 3 REV (64), 4 CLZ, 5 CLS,
+/// and FEAT_CSSC's 6 CTZ, 7 CNT, 8 ABS.
 pub(package) const fn dp1(sf: bool, opc: u32, rd: u32, rn: u32) u32 {
     return sfb(sf) | 0x5AC00000 | opc << 10 | rn << 5 | rd;
 }
@@ -227,6 +248,9 @@ pub(package) const DP1_REV16: u32 = 1;
 pub(package) const DP1_REV32: u32 = 2;
 pub(package) const DP1_REV64: u32 = 3;
 pub(package) const DP1_CLZ: u32 = 4;
+pub(package) const DP1_CTZ: u32 = 6;
+pub(package) const DP1_CNT: u32 = 7;
+pub(package) const DP1_ABS: u32 = 8;
 
 /// MADD (`sub` false) or MSUB: `rd` = ra +- rn * rm.
 pub(package) const fn madd(sf: bool, sub: bool, rd: u32, rn: u32, rm: u32, ra: u32) u32 {
@@ -747,4 +771,30 @@ pub(package) const fn fp_imm8(d: bool, bits: u64) u32 {
 /// FMOV (immediate) of `imm8` (`fp_imm8`).
 pub(package) const fn fmov_imm(d: bool, rd: u32, imm8: u32) u32 {
     return 0x1E201000 | ftype(d) | imm8 << 13 | rd;
+}
+
+/// SVE PTRUE `pd`.T (element size `sz`: 0 to 3 for bytes to doublewords) of pattern `pat` (`VL1` .. `VL8`
+/// are 1 to 8, `VL16` 9, all 31).
+pub(package) const fn sve_ptrue(sz: u32, pd: u32, pat: u32) u32 {
+    return 0x2518E000 | sz << 22 | pat << 5 | pd;
+}
+
+/// SVE CMPNE `pd`.T, `pg`/z, `zn`.T, #`imm` (a signed 5-bit immediate).
+pub(package) const fn sve_cmpne_imm(sz: u32, pd: u32, pg: u32, zn: u32, imm: i32) u32 {
+    return 0x25008010 | sz << 22 | (imm as u32 & 31) << 16 | pg << 10 | zn << 5 | pd;
+}
+
+/// SVE LD1B, LD1H, LD1W or LD1D (`sz`) {`zt`.T}, `pg`/z, [`xn`]: the inactive elements 0.
+pub(package) const fn sve_ld1(sz: u32, zt: u32, pg: u32, xn: u32) u32 {
+    return 0xA400A000 | sz << 23 | sz << 21 | pg << 10 | xn << 5 | zt;
+}
+
+/// SVE ST1B, ST1H, ST1W or ST1D (`sz`) {`zt`.T}, `pg`, [`xn`]: the active elements alone.
+/// SEL zd.T, pv, zn.T, zm.T (T of 1 << `sz` bytes): zn's elements where pv is set, else zm's.
+pub(package) const fn sve_sel(sz: u32, zd: u32, pv: u32, zn: u32, zm: u32) u32 {
+    return 0x0520C000 | sz << 22 | zm << 16 | pv << 10 | zn << 5 | zd;
+}
+
+pub(package) const fn sve_st1(sz: u32, zt: u32, pg: u32, xn: u32) u32 {
+    return 0xE400E000 | sz << 23 | sz << 21 | pg << 10 | xn << 5 | zt;
 }

@@ -29,6 +29,25 @@ fn sdk_flags_carry_the_triple() {
     assert(rel.as_str().ends_with(" -msimd128 -mrelaxed-simd"), "relaxed-simd implies simd128");
 }
 
+// Windows arm64 builds through its C tree alone: its atomics go through compiler-rt's helpers, which pick
+// LSE once by the CPU (`Target.outline_atomics`), unless the build has LSE; Linux arm64's native code
+// chooses its own copies (no flag).
+@test
+fn windows_arm64_atomics_choose_lse_at_run_time() {
+    let win = tgt::axis_index("windows", false);
+    let a64 = tgt::axis_index("aarch64", true);
+    let mut w = String::new();
+    util::push_sdk_flags(&mut w, win, a64, tgt::baseline(win, a64));
+    assert(w.as_str().ends_with(" -moutline-atomics"), w.as_str());
+    let mut wl = String::new();
+    util::push_sdk_flags(&mut wl, win, a64, cf::close(cf::with(tgt::baseline(win, a64), cf::find("lse", a64) as usize)));
+    assert(!wl.as_str().contains("outline"), wl.as_str());
+    let lin = tgt::axis_index("linux", false);
+    let mut l = String::new();
+    util::push_sdk_flags(&mut l, lin, a64, tgt::baseline(lin, a64));
+    assert(!l.as_str().contains("outline"), l.as_str());
+}
+
 @test
 fn wasi_sysroot_is_one_unquoted_argument() {
     // The flag string is split on whitespace into argv, so a quote would reach the compiler verbatim.

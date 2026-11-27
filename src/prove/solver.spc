@@ -25,7 +25,8 @@ import prove::kernel as *;
 import prove::blast as *;
 import prove::sat as *;
 
-// The blocks, chain blocks and solver steps one body may spend.
+// The blocks, chain blocks and solver steps one body may spend, unless build.toml's `prove-steps` sets
+// another number (`Package.prove_steps`).
 pub(package) const STEP_BUDGET: u32 = 4000000;
 // The steps between two stop polls (`Solver::tick`): a poll reads the language server's input queue.
 const POLL_STEPS: u32 = 4096;
@@ -880,8 +881,9 @@ pub(package) struct Solver<const B: usize> {
     sat_cut: bool,
     // The value of each atom in the last integer model of the walk's simplex (`implied`).
     warm: Map<u32, Num<B>>,
-    pub(package) steps: u32, // the steps spent, against `STEP_BUDGET` with the walk's
-    // The steps a check may reach: STEP_BUDGET, or fewer for a stage that rarely proves (`Prover::holds_in`).
+    pub(package) steps: u32, // the steps spent, against the body's budget with the walk's (`Prover::budget`)
+    // The steps a check may reach: the body's budget, or fewer for a stage that rarely proves
+    // (`Prover::holds_in`).
     pub(package) limit: u32,
     // Whether a number past B bits that the rows of small numbers do not avoid ends the check (`refute`):
     // the wide prover proves the body again (`Prover::oblige`). `gave_up` once it did.

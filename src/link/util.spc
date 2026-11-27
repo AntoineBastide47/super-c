@@ -1,6 +1,7 @@
 // Byte helpers the linkers share: whole-file reads and writes, little-endian fields, LEB128.
 import std::platform::fs;
 import codegen::obj as ob;
+import utils::par as par;
 
 /// The bytes of file `path`, None when it cannot be read in full.
 pub(package) fn read(path: str) Option<Vector<u8>> {
@@ -457,4 +458,255 @@ extend Missing {
         }
         return false;
     }
+}
+
+// ---- identical code folding ------------------------------------------------------------------------------
+
+/// A function a link may fold into an identical one (`fold`): its bytes `at .. at + len` of the input, what
+/// else must be the same (`key`: the format's alignment, flags and unwind rules), the hash of both
+/// (`fold_hashes`), and its relocations `rels[r0 .. r0 + rn]`, in place order.
+pub(package) struct FoldPart {
+    pub(package) at: usize,
+    pub(package) len: usize,
+    pub(package) key: u64,
+    pub(package) hash: u64,
+    pub(package) r0: u32,
+    pub(package) rn: u32,
+}
+
+/// A relocation of a `FoldPart`: its place in the part, its kind (the format's fields but the target and the
+/// addend), and its target: part `part`, or (`part` NONE) any other target `tgt` (the format's exact name of a
+/// symbol or section, `FOLD_GLOBAL`, `FOLD_ABS`, `FOLD_SECTION`), at `val` (offset and addend).
+pub(package) struct FoldRel {
+    pub(package) off: u32,
+    pub(package) kind: u32,
+    pub(package) part: u32,
+    pub(package) tgt: u64,
+    pub(package) val: u64,
+}
+
+extend FoldPart as Copy {}
+extend FoldRel as Copy {}
+
+pub(package) const FOLD_NONE: u32 = 0xFFFFFFFF;
+/// The tags of a `FoldRel`'s other target: a global symbol (its id below), an absolute value (`val`), an input
+/// section (its index below).
+pub(package) const FOLD_GLOBAL: u64 = 1u64 << 32;
+pub(package) const FOLD_ABS: u64 = 2u64 << 32;
+pub(package) const FOLD_SECTION: u64 = 3u64 << 32;
+
+/// Each part's `hash` of its key and bytes, on `jobs` workers. Only parts of one hash may fold: a caller
+/// lists the relocations of those alone, and takes the others as the targets they are.
+pub(package) fn fold_hashes(ps: &mut Vector<FoldPart>, b: []u8, jobs: u32) {
+    let mut fc = FoldCtx { ps: ps.as_mut_ptr(), n: ps.len(), b: b.ptr, blen: b.len };
+    par::chunks((ps.len() + FOLD_CHUNK - 1) / FOLD_CHUNK, jobs, fold_chunk, (&mut fc) as *mut FoldCtx);
+}
+
+// The parts a job of `fold_hashes` takes.
+const FOLD_CHUNK: usize = 256;
+
+// What `fold_chunk` reads and writes: the parts and the bytes.
+struct FoldCtx {
+    ps: *mut FoldPart,
+    n: usize,
+    b: *const u8,
+    blen: usize,
+}
+
+// The hashes of chunk `c` of the parts, each part's into its own `hash`.
+const fn fold_chunk(ctx: *mut void, c: usize) {
+    let fc = unsafe &*(ctx as *const FoldCtx);
+    let b = unsafe Slice::<u8> { ptr: fc.b, len: fc.blen };
+    let lo = c * FOLD_CHUNK;
+    let hi = (lo + FOLD_CHUNK).min(fc.n);
+    for i in lo..hi {
+        let p = unsafe &mut fc.ps[i];
+        let mut h = (p.key ^ p.len as u64).wrapping_mul(0x9E3779B97F4A7C15);
+        let mut k: usize = 0;
+        while k + 8 <= p.len {
+            h = (h ^ r64(b, p.at + k)).wrapping_mul(0x100000001B3);
+            k += 8;
+        }
+        while k < p.len {
+            h = (h ^ b[p.at + k] as u64).wrapping_mul(0x100000001B3);
+            k += 1;
+        }
+        p.hash = h;
+    }
+}
+
+/// Per part of `ps`, the part it folds into: the first of its class, NONE for that one and for a part alone. A
+/// class holds parts of the same key, bytes and relocations, a relocation's target part counting by its
+/// class: the classes split until every part's targets' classes agree (partition refinement, as LLD's
+/// identical code folding), so two parts of a class run the same code on the same data.
+pub(package) fn fold(ps: &Vector<FoldPart>, rs: &Vector<FoldRel>, b: []u8) Vector<u32> {
+    let n = ps.len();
+    let mut cls = Vector::<u32>::new();
+    cls.resize_default(n);
+    let mut keys = Vector::<u128>::with_capacity(n);
+    // The parts with a relocation against a part: the others never split after the first classes.
+    let mut dep = Vector::<u32>::new();
+    for i in 0..n {
+        let p = ps[i];
+        let mut h = p.hash;
+        let mut d = false;
+        for r in p.r0..p.r0 + p.rn {
+            let x = rs[r as usize];
+            h = (h ^ x.off as u64 << 32 ^ x.kind ^ (x.part == FOLD_NONE) as u64).wrapping_mul(0x100000001B3);
+            h = (h ^ x.tgt ^ x.val.rotate_left(17)).wrapping_mul(0x100000001B3);
+            d = d || x.part != FOLD_NONE;
+        }
+        keys.push(h as u128 << 32 | i as u64);
+        if d {
+            dep.push(i as u32);
+        }
+    }
+    keys.sort();
+    // The first classes: the same constant parts (`fold_same`).
+    let mut nc = fold_split(&keys, &mut cls, |x: usize, y: usize| fold_same(&ps[x], &ps[y], rs, b));
+    let mut next = Vector::<u32>::new();
+    next.resize_default(n);
+    // Each round splits a class or ends: at most one round per part.
+    for _ in 0..n + 1 {
+        keys.truncate(0);
+        for k in 0..dep.len() {
+            let i = dep[k] as usize;
+            let p = ps[i];
+            let mut h = (cls[i] as u64).wrapping_mul(0x9E3779B97F4A7C15);
+            for r in p.r0..p.r0 + p.rn {
+                if rs[r as usize].part != FOLD_NONE {
+                    h = (h ^ cls[rs[r as usize].part as usize] as u64).wrapping_mul(0x100000001B3);
+                }
+            }
+            keys.push(cls[i] as u128 << 96 | h as u128 << 32 | i as u64);
+        }
+        keys.sort();
+        // A class keeps its id when no part of it moves; a split gives the moved parts new ones.
+        for i in 0..n {
+            next[i] = cls[i];
+        }
+        let m = fold_refine(&keys, &cls, &mut next, nc, |x: usize, y: usize| fold_targets(&ps[x], &ps[y], rs, &cls));
+        let done = m == nc;
+        let t = replace(&mut cls, Vector::<u32>::new());
+        cls = replace(&mut next, t);
+        nc = m;
+        if done {
+            break;
+        }
+    }
+    // The first part of each class, by index.
+    let mut first = Vector::<u32>::new();
+    for _ in 0..nc {
+        first.push(FOLD_NONE);
+    }
+    let mut out = Vector::<u32>::with_capacity(n);
+    for i in 0..n {
+        let c = cls[i] as usize;
+        if first[c] == FOLD_NONE {
+            first[c] = i as u32;
+            out.push(FOLD_NONE);
+        } else {
+            out.push(first[c]);
+        }
+    }
+    return out;
+}
+
+// Class ids into `cls` for the parts `keys` lists sorted (`hash << 32 | part`): a part takes the class of the
+// first earlier part of its run of equal hashes that `same` holds for, else a new one. The class count.
+fn fold_split<F: fn(usize, usize) bool>(keys: &Vector<u128>, cls: &mut Vector<u32>, same: F) u32 {
+    let mut nc: u32 = 0;
+    // The parts of the current run that started a class.
+    let mut heads = Vector::<u32>::new();
+    for k in 0..keys.len() {
+        let i = (keys[k] & 0xFFFFFFFF) as usize;
+        if k == 0 || keys[k] >> 32 != keys[k - 1] >> 32 {
+            heads.truncate(0);
+        }
+        let mut c = FOLD_NONE;
+        for q in heads.iter() {
+            if same((*q) as usize, i) {
+                c = cls[(*q) as usize];
+                break;
+            }
+        }
+        if c == FOLD_NONE {
+            c = nc;
+            nc += 1;
+            heads.push(i as u32);
+        }
+        cls[i] = c;
+    }
+    return nc;
+}
+
+// One round of the refinement: the parts `keys` lists sorted (`old class << 96 | hash << 32 | part`, the
+// parts that depend on others) split their old classes `cls` into `next`, which holds the old ones. The
+// first group of an old class keeps its id, each other group takes a new one past `nc`. The class count.
+fn fold_refine<F: fn(usize, usize) bool>(
+    keys: &Vector<u128>,
+    cls: &Vector<u32>,
+    next: &mut Vector<u32>,
+    nc0: u32,
+    same: F,
+) u32 {
+    let mut nc = nc0;
+    // The parts of the current run of one old class and hash that started a group, and the groups' ids.
+    let mut heads = Vector::<u32>::new();
+    // Whether the current old class gave out its id yet.
+    let mut kept = false;
+    for k in 0..keys.len() {
+        let i = (keys[k] & 0xFFFFFFFF) as usize;
+        if k == 0 || keys[k] >> 96 != keys[k - 1] >> 96 {
+            kept = false;
+        }
+        if k == 0 || keys[k] >> 32 != keys[k - 1] >> 32 {
+            heads.truncate(0);
+        }
+        let mut c = FOLD_NONE;
+        for q in heads.iter() {
+            if same((*q) as usize, i) {
+                c = next[(*q) as usize];
+                break;
+            }
+        }
+        if c == FOLD_NONE {
+            if kept {
+                c = nc;
+                nc += 1;
+            } else {
+                c = cls[i];
+                kept = true;
+            }
+            heads.push(i as u32);
+        }
+        next[i] = c;
+    }
+    return nc;
+}
+// Whether parts `p` and `q` have the same constant parts: key, bytes, relocations but their target parts.
+const fn fold_same(p: &FoldPart, q: &FoldPart, rs: &Vector<FoldRel>, b: []u8) bool {
+    if p.key != q.key || p.len != q.len || p.rn != q.rn || b[p.at..p.at + p.len] != b[q.at..q.at + q.len] {
+        return false;
+    }
+    for k in 0..p.rn {
+        let x = rs[(p.r0 + k) as usize];
+        let y = rs[(q.r0 + k) as usize];
+        if x.off != y.off || x.kind != y.kind || x.part == FOLD_NONE != (y.part == FOLD_NONE) || x.tgt != y.tgt || x.val != y.val {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Whether the target parts of `p`'s and `q`'s relocations (the same constant parts) are of one class each.
+const fn fold_targets(p: &FoldPart, q: &FoldPart, rs: &Vector<FoldRel>, cls: &Vector<u32>) bool {
+    for k in 0..p.rn {
+        let x = rs[(p.r0 + k) as usize];
+        let y = rs[(q.r0 + k) as usize];
+        if x.part != FOLD_NONE && cls[x.part as usize] != cls[y.part as usize] {
+            return false;
+        }
+    }
+    return true;
 }

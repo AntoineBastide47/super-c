@@ -1,81 +1,29 @@
 // std::math::integer: bit fields, bit counts, extended arithmetic, powers of two, multiples, integer
 // `log2`, bit interleaving, masks and rotations on scalars and vectors, then the edge cases: 8- and
-// 16-bit operands computed in a wider type, the `i32`-built masks, signed inputs, carry and borrow
-// extremes, `round_multiple` as a floor, the panic of `ceil_multiple` and constant initializers.
+// 16-bit operands computed in a wider type, the `i32`-built masks, signed inputs, `round_multiple` as a
+// floor, the panic of `ceil_multiple` and constant initializers. Lemmas state bit field extraction and
+// insertion, carries, borrows and extended products for every input.
 import std::math::scalar as *;
 import std::math::vec as *;
 import std::math::integer as *;
 
 // Bit fields, bit counts and extended arithmetic.
 
-@test
-fn bitfield_insert_table() {
-    let base: [u32; 6] = [0x00000000, 0x00000000, 0x00000000, 0xff000000, 0xffff0000, 0x0000ffff];
-    let insert: [u32; 6] = [0xffffffff, 0xffffffff, 0xffffffff, 0x000000ff, 0xffff0000, 0x0000ffff];
-    let offset: [i32; 6] = [0, 0, 0, 8, 16, 16];
-    let bits: [i32; 6] = [32, 31, 0, 8, 16, 16];
-    let ret: [u32; 6] = [0xffffffff, 0x7fffffff, 0x00000000, 0xff00ff00, 0x00000000, 0xffffffff];
-    for i in 0..6 {
-        unsafe {
-            assert_eq(bitfield_insert(base[i], insert[i], offset[i], bits[i]), ret[i]);
-        }
-    }
-}
+// The build proves these laws for every input in range, and for each component of a vector.
+lemma bitfield_extract_u32(v: u32, o: i32, b: i32)
+    requires 0 <= o && o < 32 && 0 <= b && b <= 32 - o
+    ensures bitfield_extract::<u32, u32>(v, o, b) as u64 == (v as u64 >> o as u64 & (1u64 << b as u64) - 1)
+{}
 
-@test
-fn bitfield_extract_table() {
-    let value: [u32; 17] = [
-        0xffffffff,
-        0xffffffff,
-        0x00000000,
-        0x0f0f0f0f,
-        0x00000000,
-        0x80000000,
-        0x7fffffff,
-        0x00000300,
-        0x0000ff00,
-        0xfffffff0,
-        0x000000ff,
-        0x000000ff,
-        0x00000000,
-        0xffffffff,
-        0xffff0000,
-        0xfffffff0,
-        0xffffffff,
-    ];
-    let offset: [i32; 17] = [0, 8, 0, 0, 8, 31, 31, 8, 8, 0, 1, 0, 0, 0, 16, 0, 16];
-    let bits: [i32; 17] = [32, 0, 32, 32, 0, 1, 1, 8, 8, 5, 3, 3, 2, 8, 16, 8, 16];
-    let ret: [u32; 17] = [
-        0xffffffff,
-        0x00000000,
-        0x00000000,
-        0x0f0f0f0f,
-        0x00000000,
-        0x00000001,
-        0x00000000,
-        0x00000003,
-        0x000000ff,
-        0x00000010,
-        0x00000007,
-        0x00000007,
-        0x00000000,
-        0x000000ff,
-        0x0000ffff,
-        0x00000000,
-        0x00000000,
-    ];
-    for i in 0..17 {
-        unsafe {
-            let r = bitfield_extract(value[i], offset[i], bits[i]);
-            // The last two rows list a wrong result: the function must not return it.
-            if i < 15 {
-                assert_eq(r, ret[i]);
-            } else {
-                assert_ne(r, ret[i]);
-            }
-        }
-    }
-}
+lemma bitfield_extract_vec(v: Vec<u32, 2>, o: i32, b: i32)
+    requires 0 <= o && o < 32 && 0 <= b && b <= 32 - o
+    ensures bitfield_extract::<u32, Vec<u32, 2>>(v, o, b).e[1] as u64 == (v.e[1] as u64 >> o as u64 & (1u64 << b as u64) - 1)
+{}
+
+lemma bitfield_insert_u32(v: u32, x: u32, o: i32, b: i32)
+    requires 0 <= o && o < 32 && 0 <= b && b <= 32 - o
+    ensures bitfield_insert::<u32, u32>(v, x, o, b) as u64 == (v as u64 & ~((1u64 << b as u64) - 1 << o as u64) | x as u64 << o as u64 & (1u64 << b as u64) - 1 << o as u64)
+{}
 
 @test
 fn bitfield_reverse_table() {
@@ -134,74 +82,46 @@ fn find_lsb_int() {
     }
 }
 
-@test
-fn uadd_carry_overflow() {
-    let (r0, c0) = uadd_carry(u32::MAX, 0u32);
-    assert_eq(c0, 0);
-    assert_eq(r0, u32::MAX);
-    let (r1, c1) = uadd_carry(u32::MAX, 1u32);
-    assert_eq(c1, 1);
-    assert_eq(r1, 0);
-    let (r2, c2) = uadd_carry(uvec1::new(u32::MAX), uvec1::new(0));
-    assert(c2 == uvec1::new(0));
-    assert(r2 == uvec1::new(u32::MAX));
-    let (r3, c3) = uadd_carry(uvec1::new(u32::MAX), uvec1::new(1));
-    assert(c3 == uvec1::new(1));
-    assert(r3 == uvec1::new(0));
-}
+lemma uadd_carry_u32(x: u32, y: u32)
+    ensures uadd_carry::<u32>(x, y).0 == x.wrapping_add(y)
+    ensures uadd_carry::<u32>(x, y).1 as u64 == x as u64 + y as u64 >> 32
+{}
 
-fn borrow_vec<const N: usize>() {
-    let x = Vec::<u32, N>::splat(16);
-    let y = Vec::<u32, N>::splat(17);
-    let (r, b) = usub_borrow(x, y);
-    assert(b == Vec::<u32, N>::splat(1));
-    assert(r == x - y);
-}
+lemma uadd_carry_vec(x: Vec<u32, 3>, y: Vec<u32, 3>)
+    ensures uadd_carry::<Vec<u32, 3>>(x, y).0.e[2] == x.e[2].wrapping_add(y.e[2])
+    ensures uadd_carry::<Vec<u32, 3>>(x, y).1.e[2] as u64 == x.e[2] as u64 + y.e[2] as u64 >> 32
+{}
 
-@test
-fn usub_borrow_underflow() {
-    let (r, b) = usub_borrow(16u32, 17u32);
-    assert_eq(b, 1);
-    assert_eq(r, 16u32.wrapping_sub(17));
-    borrow_vec::<1>();
-    borrow_vec::<2>();
-    borrow_vec::<3>();
-    borrow_vec::<4>();
-}
+lemma usub_borrow_u32(x: u32, y: u32)
+    ensures usub_borrow::<u32>(x, y).0 == x.wrapping_sub(y)
+    ensures usub_borrow::<u32>(x, y).1 == if x < y {
+        1u32
+    } else {
+        0u32
+    }
+{}
 
-fn umul_vec<const N: usize>() {
-    let (msb, lsb) = umul_extended(Vec::<u32, N>::splat(2), Vec::<u32, N>::splat(3));
-    assert(msb == Vec::<u32, N>::splat(0));
-    assert(lsb == Vec::<u32, N>::splat(6));
-}
+lemma usub_borrow_vec(x: Vec<u32, 4>, y: Vec<u32, 4>)
+    ensures usub_borrow::<Vec<u32, 4>>(x, y).1.e[3] == if x.e[3] < y.e[3] {
+        1u32
+    } else {
+        0u32
+    }
+{}
 
-fn imul_vec<const N: usize>() {
-    let (msb, lsb) = imul_extended(Vec::<i32, N>::splat(2), Vec::<i32, N>::splat(3));
-    assert(msb == Vec::<i32, N>::splat(0));
-    assert(lsb == Vec::<i32, N>::splat(6));
-}
+lemma umul_extended_u32(x: u32, y: u32)
+    ensures umul_extended::<u32>(x, y).0 as u64 == x as u64 * y as u64 >> 32
+    ensures umul_extended::<u32>(x, y).1 == x.wrapping_mul(y)
+{}
 
-@test
-fn umul_extended_small_product() {
-    let (msb, lsb) = umul_extended(2u32, 3u32);
-    assert_eq(msb, 0);
-    assert_eq(lsb, 6);
-    umul_vec::<1>();
-    umul_vec::<2>();
-    umul_vec::<3>();
-    umul_vec::<4>();
-}
+lemma umul_extended_vec(x: Vec<u32, 4>, y: Vec<u32, 4>)
+    ensures umul_extended::<Vec<u32, 4>>(x, y).0.e[3] as u64 == x.e[3] as u64 * y.e[3] as u64 >> 32
+{}
 
-@test
-fn imul_extended_small_product() {
-    let (msb, lsb) = imul_extended(2, 3);
-    assert_eq(msb, 0);
-    assert_eq(lsb, 6);
-    imul_vec::<1>();
-    imul_vec::<2>();
-    imul_vec::<3>();
-    imul_vec::<4>();
-}
+lemma imul_extended_i32(x: i32, y: i32)
+    ensures imul_extended::<i32>(x, y).0 as i64 == x as i64 * y as i64 >> 32
+    ensures imul_extended::<i32>(x, y).1 == x.wrapping_mul(y)
+{}
 
 @test
 fn bit_count_table() {
@@ -650,22 +570,6 @@ fn signed_bit_functions() {
     assert_eq(bitfield_rotate_left(0x81u8, 1), 0xC0);
     assert_eq(bitfield_reverse(1i32), i32::MIN);
     assert_eq(find_nsb(-1, 1), 0);
-}
-
-@test
-fn carry_borrow_extremes() {
-    let (r, c) = uadd_carry(uvec3::new(u32::MAX, 1, 0x80000000), uvec3::new(u32::MAX, 2, 0x80000000));
-    assert(r == uvec3::new(u32::MAX - 1, 3, 0));
-    assert(c == uvec3::new(1, 0, 1));
-    let (um, ul) = umul_extended(u32::MAX, u32::MAX);
-    assert_eq(um, 0xFFFFFFFE);
-    assert_eq(ul, 1);
-    let (im, il) = imul_extended(i32::MIN, -1);
-    assert_eq(im, 0);
-    assert_eq(il, i32::MIN);
-    let (vm, vl) = imul_extended(ivec2::new(-2, i32::MAX), ivec2::new(3, i32::MAX));
-    assert(vm == ivec2::new(-1, 0x3FFFFFFF));
-    assert(vl == ivec2::new(-6, 1));
 }
 
 @test

@@ -52,13 +52,19 @@ caller's effective set holds the callee's, 1 it needs `unsafe`, 2 an error even 
 extern binding, an `@always_inline` callee), reports the uses not covered, the `@export`
 functions with features and the outside-called ones (`main`, tests, benches) the build cannot
 call, and sets `fn_union`; `lint_feature_unsafe` reports a deferred marker no use of class 1 or 2
-needs (a build's lints and `lint`), with the `(cpu::Feature, f)` tuple rows of feature functions
+needs, nor one that needs it on another platform of the instruction set (`needed_elsewhere`: a
+feature this platform's baseline gives and another's lacks, which the caller does not add; std code
+macOS and Linux arm64 share), (a build's lints and `lint`), with the `(cpu::Feature, f)` tuple rows of feature functions
 (`Ast.feature_rows`, a `detect::dispatch` table) whose feature does not imply the function's. `tc_feature_bound_args` rejects a feature function as the
 value of a closure bound. The Core IR inliner never splices a callee whose features its caller's
 set lacks (`inline.spc`, reason `IJ_NOT_FN`).
 
 Feature clones: `InlineStore::build` copies every kept function body that holds a vector and no
-closure (`vec_ix`, `vec_bodies`, `vec_body`). While a body emits under a set that holds a backend
+closure (`vec_ix`, `vec_bodies`, `vec_body`), then, in up to `MAX_DEPTH` passes, every one that calls
+such a body by name, without type arguments, from a block in a cycle of its blocks (`in_cycle`) when
+the callee is within `VEC_SCALE` times the callee limits (`size_within`, `loops_into_vector`): the
+caller then checks the level once at its entry, and `lir::inline` strips the check of the callee it
+inlines, which would otherwise run at each step. While a body emits under a set that holds a backend
 entry the build's closure does not (`CEmit.fs`: a `@target_feature` function's, or a clone's; SME
 alone holds none), `CEmit::clone_set` gives a call of such a function that states no features that
 set: `callee_sym_i` spells `<symbol>__fs<32 hex
@@ -71,10 +77,28 @@ for several TUs (the serial drain after the seeds), so its local-declaration mem
 keyed by the spelling context too: the first render in a TU records the type's definition edge.
 
 Run-time copies (`--simd-dispatch`): the load computes `Package.simd_levels` (`simd_levels_compute`:
-the levels of `simd_dispatch` over the build's features, closed, by size; x86_64 only; `build::dispatch_for` turns an unset level list into `off` at opt-level 0
+on x86_64 the levels of `simd_dispatch` over the build's features, closed, by size; on an arm64 target
+whose row has `run_time` levels (Linux: LSE and RCPC, then CSSC too) those, with the HWCAP and HWCAP2
+bits each needs (`run_time_hwcap`, `Package.simd_hwcap`, saved in the prelude image and hashed into the
+TU cache key); `build::dispatch_for` turns an unset level list into `off` at opt-level 0
 or 1 and for a script without a profile) and, for a
 program with vectors, loads the detector module `sc_cpu` (`ffi/sc_cpu.spc`), whose `@export("sc_cpu_words")`
 the prologues call.
+
+Scalar copy levels: `CEmit` gives `lir::Package.copy_flags`, per level its `CPU_SCALAR` flags (x86-64-v3:
+POPCNT, LZCNT, BMI1, BMI2, MOVBE, FMA; arm64: LSE, RCPC, CSSC). The native generators compile a body once
+per level whose flags save instructions where it pays (`place::copy_levels`: the generator's
+`copy_differs` gives the instructions an instruction saves, x86 POPCNT 13, FMA 20, LZCNT 3, TZCNT 2,
+BLSR/BLSMSK/BLSI/ANDN 1, arm64 LSE 3, RCPC 1, CSSC CNT 3, CTZ 1; a level pays where it saves one
+instruction in `COPY_GAIN` (8) of a loop, `place::loops_of` giving nested loops each, or of a body of at
+most `COPY_SMALL` (64) instructions), as local `<name>.l<k>` with the level's flags (`Cpu::with_flags`)
+and `<name>.base`; `<name>` is a stub that compares the level byte `__sc_simd_lv` and branches to the
+highest copy it reaches. A naked body and one that reads the level byte (vector copies) get none. The
+loop vectorizer plans for a copy level's POPCNT: a bit count of lanes past one byte stays scalar, for
+the copy (x86-64 `bitvec_count_ones` as fast as with the feature built in). The
+registry's start-up (`simd_level_init`) sets the byte: from the detector where it is loaded, from
+`getauxval(AT_HWCAP)` and `(AT_HWCAP2)` on arm64 Linux, else from CPUID and XGETBV inline on x86-64.
+On the compiler: x86-64 37 copies, 1.50% of its code; arm64 132, 2.17%.
 `CEmit::dispatch_prologue` opens every function `vec_body` keeps that states no features and emits
 under the build's set with `if (__sc_simd_lvl() >= k) return <name>__fs<hex>(<its parameters>);`,
 the highest level first (the `__r` split body forwards to the copy's `__r`), and demands each copy
@@ -303,12 +327,21 @@ intrinsic kernels for `A`; and the fixpoint and `check.sh` pass on the host.
 
 Decisions: no architecture beyond x86_64, aarch64 and wasm32 has been requested. RISC-V with a
 fixed `VLEN` (`zvl128b`, `zvl256b`, RVV intrinsics), POWER VSX (`<altivec.h>`), LoongArch LSX/LASX
-and s390x z/Vector are not compiler targets, so each needs the architecture first. SVE and SVE2 are
-detected only: a scalable register has a run-time length, which no `Simd<T, N>` (a compile-time
-size) describes, so no fixed-width backend uses them. SME (`sme`, `sme2`, `sme-f64f64`) has no
+and s390x z/Vector are not compiler targets, so each needs the architecture first. SVE and SVE2 have
+no backend entries: a scalable register has a run-time length, which no `Simd<T, N>` (a compile-time
+size) describes. The arm64 code generator uses SVE predicates on NEON's 16 bytes instead: a masked
+load or store through a pointer whose mask is a lane comparison's or a lane mask's bits sets one
+(`codegen::live::FOLD_PRED`) where the body has `sve` (`Cpu.vpred`) or the access runs only where
+the CPU has it (`VOP_PRED`, the vectorizer's masked last iterations under the start-up's SVE test;
+`references/lir.md`). SME (`sme`, `sme2`, `sme-f64f64`) has no
 backend entries either: its outer products are matrix operations, which module-level assembly kernels of std run
 (`ffi/sc_sme.spc` for `std::simd::matrix`, super-c-language `references/simd.md`), each entering
-streaming mode itself.
+streaming mode itself. AMX (`amx-tile`, `amx-int8`) has no backend entries either: a Super-C kernel
+(`ffi/sc_amx.spc`, Linux x86_64; `a` and `c` in place, a tile configuration per edge block) runs
+`matrix::mul_i8` and `mul_u8i8` on the tiles through the `_tile_*`
+intrinsics of `ffi/immintrin.spc` (the tile numbers constant arguments); their templates are impure
+(`intrin::pure`), so the optimizer neither removes nor reorders them. The x86-64 assembler takes `%tmm0` to
+`%tmm7` and AMX's memory operand (a base and an index, `MS`).
 
 ## Tests
 

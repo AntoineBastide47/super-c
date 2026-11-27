@@ -6,7 +6,7 @@
 // one-call wrapper of each; `tests/codegen/asm_test.spc` checks each assembles to clang's bytes.
 
 /// The rows, by name: the intrinsic and its instructions.
-pub(package) const ROWS: [(str<'static>, str<'static>); 659] = [
+pub(package) const ROWS: [(str<'static>, str<'static>); 670] = [
     ("__crc32b", "crc32b w0, w0, w1"),
     ("__crc32cb", "crc32cb w0, w0, w1"),
     ("__crc32cd", "crc32cx w0, w0, x1"),
@@ -411,6 +411,7 @@ pub(package) const ROWS: [(str<'static>, str<'static>); 659] = [
     ("vmull_high_u16", "umull2 v0.4s, v0.8h, v1.8h"),
     ("vmull_high_u32", "umull2 v0.2d, v0.4s, v1.4s"),
     ("vmull_high_u8", "umull2 v0.8h, v0.16b, v1.16b"),
+    ("vmull_p64", "fmov d0, x1\nfmov d1, x0\npmull v0.1q, v1.1d, v0.1d\nmov x1, v0.d[1]\nfmov x0, d0"),
     ("vmull_s16", "smull v0.4s, v0.4h, v1.4h"),
     ("vmull_s32", "smull v0.2d, v0.2s, v1.2s"),
     ("vmull_s8", "smull v0.8h, v0.8b, v1.8b"),
@@ -582,10 +583,20 @@ pub(package) const ROWS: [(str<'static>, str<'static>); 659] = [
     ("vrndpq_f64", "frintp v0.2d, v0.2d"),
     ("vrndq_f32", "frintz v0.4s, v0.4s"),
     ("vrndq_f64", "frintz v0.2d, v0.2d"),
+    ("vsha1cq_u32", "fmov s2, w0\nsha1c q0, s2, v1.4s"),
+    ("vsha1h_u32", "fmov s0, w0\nsha1h s0, s0\nfmov w0, s0"),
+    ("vsha1mq_u32", "fmov s2, w0\nsha1m q0, s2, v1.4s"),
+    ("vsha1pq_u32", "fmov s2, w0\nsha1p q0, s2, v1.4s"),
+    ("vsha1su0q_u32", "sha1su0 v0.4s, v1.4s, v2.4s"),
+    ("vsha1su1q_u32", "sha1su1 v0.4s, v1.4s"),
     ("vsha256h2q_u32", "sha256h2 q0, q1, v2.4s"),
     ("vsha256hq_u32", "sha256h q0, q1, v2.4s"),
     ("vsha256su0q_u32", "sha256su0 v0.4s, v1.4s"),
     ("vsha256su1q_u32", "sha256su1 v0.4s, v1.4s, v2.4s"),
+    ("vsha512h2q_u64", "sha512h2 q0, q1, v2.2d"),
+    ("vsha512hq_u64", "sha512h q0, q1, v2.2d"),
+    ("vsha512su0q_u64", "sha512su0 v0.2d, v1.2d"),
+    ("vsha512su1q_u64", "sha512su1 v0.2d, v1.2d, v2.2d"),
     ("vshl_s16", "sshl v0.4h, v0.4h, v1.4h"),
     ("vshl_s32", "sshl v0.2s, v0.2s, v1.2s"),
     ("vshl_s8", "sshl v0.8b, v0.8b, v1.8b"),

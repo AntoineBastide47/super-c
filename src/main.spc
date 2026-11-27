@@ -487,9 +487,10 @@ fn lint_alt() str<'static> {
     return "";
 }
 
-// The manifest settings of a lint run on `p`: the profiles a PROFILE comparison may name (the manifest's,
-// else the built-ins) and `std_internals`.
+// The settings of a lint run on `p`: `--proofs`, the profiles a PROFILE comparison may name (the
+// manifest's, else the built-ins), `std_internals` and `prove-steps`.
 fn lint_settings(p: &mut loader::Package) {
+    p.lint_proofs = unsafe LINT_PROOFS;
     let manf = stdio::fopen("build.toml", "rb");
     if manf != null {
         unsafe stdio::fclose(manf);
@@ -498,6 +499,7 @@ fn lint_settings(p: &mut loader::Package) {
             let man = mo.unwrap();
             p.profiles = bsys::profile_names(&man);
             p.std_internals = man.std_internals;
+            p.prove_steps = man.prove_steps;
             return;
         }
     }
@@ -595,6 +597,22 @@ fn lint_one(path: str, root: str, std_dir: str, ce_steps: u32, ce_mem: u64, targ
     // if the package has any error a machine fix cannot repair (when EVERY error carries a fix, e.g.
     // the generated-Free leak fix, applying is the way out); a final plain pass prints what remains
     // and sets the exit code.
+    if fix && unsafe LINT_PROOFS {
+        let mut one = Vector::<String>::new();
+        one.push(String::from_str(path));
+        if proof_fix(
+            &one,
+            pick(root.len() != 0, root, loader::dirname_of(path)),
+            "",
+            std_dir,
+            ce_steps,
+            ce_mem,
+            target,
+            false,
+        ) != 0 {
+            return 1;
+        }
+    }
     let mut pass = 0;
     loop {
         let mut p = loader::package_from_source("", std_dir, target);
@@ -631,6 +649,10 @@ fn lint_one(path: str, root: str, std_dir: str, ce_steps: u32, ce_mem: u64, targ
             return 1;
         }
         let rc = lint_pass(&mut p, target, lint_mod, ce_steps, ce_mem, fix, pass < 8, sc);
+        if !fix && unsafe LINT_PROOFS && p.ok {
+            let r = pick(root.len() != 0, root, loader::dirname_of(path));
+            return rc.max(proof_hints(&p, r, "", std_dir, ce_steps, ce_mem, target, false));
+        }
         if rc == 1 || !fix {
             return rc;
         }
@@ -794,6 +816,9 @@ fn lint_batch(
     if unsafe FMT_SIMPLIFY {
         return simplify_batch(files, root, alt, std_dir, ce_steps, ce_mem, target, test_build);
     }
+    if fix && unsafe LINT_PROOFS && proof_fix(files, root, alt, std_dir, ce_steps, ce_mem, target, test_build) != 0 {
+        return 1;
+    }
     let mut pass = 0;
     loop {
         let mut p = lint_load_batch(files, root, alt, std_dir, target, test_build);
@@ -802,6 +827,9 @@ fn lint_batch(
             return 1;
         }
         let rc = lint_pass(&mut p, target, 0, ce_steps, ce_mem, fix, pass < 8, sc);
+        if !fix && unsafe LINT_PROOFS && p.ok {
+            return rc.max(proof_hints(&p, root, alt, std_dir, ce_steps, ce_mem, target, test_build));
+        }
         if rc == 1 || !fix {
             return rc;
         }
@@ -817,6 +845,496 @@ fn lint_batch(
 /// `fmt -s` (`--simplify`): the lint batches remove the turbofish lists and `let` annotations their
 /// bodies do not need instead of linting (`simplify_batch`).
 static mut FMT_SIMPLIFY: bool = false;
+
+/// `lint --proofs`: each lint pass proves its modules' contracts (`Package.lint_proofs`).
+static mut LINT_PROOFS: bool = false;
+
+/// `lint --proofs --fix` tries the ghost statements of a file whose proofs take this many solver steps or
+/// more (`proof_fix`).
+const PROOF_FIX_MIN: u64 = 20000;
+
+// `lint --proofs --fix`: in each of `files` whose proofs take PROOF_FIX_MIN solver steps or more, remove the
+// proof steps its proofs do not need (a lemma's call; an `assert .. by { .. };` in a lemma or in another
+// assert's block): one at a time, from the last, each removal kept only when every proof of the file
+// still holds and their steps stay at most the file's first (a removal renumbers the terms, which moves
+// the steps of the others a little). An `assert` of a function's body is a claim of its own: one the
+// proofs do not need is reported, not removed. A probe lints
+// the file alone with its imports (`proof_probe`), the change an overlay of its source. 1 when a file
+// cannot be written, else 0.
+fn proof_fix(
+    files: &Vector<String>,
+    root: str,
+    alt: str,
+    std_dir: str,
+    ce_steps: u32,
+    ce_mem: u64,
+    target: i32,
+    test_build: bool,
+) i32 {
+    let mut rc = 0;
+    for k in 0..files.len() {
+        let f = files.at(k).as_str();
+        let text0 = loader::read_file(f).unwrap_or(String::new());
+        let t = text0.as_str();
+        if !t.contains("requires") && !t.contains("ensures") && !t.contains("assert ") && !t.contains("lemma ") {
+            continue;
+        }
+        let mut one = Vector::<String>::new();
+        one.push(String::from_str(f));
+        let mut cands = Vector::<u64>::new();
+        let mut claims = Vector::<u64>::new();
+        let all = Vector::<u32>::new();
+        let base = proof_probe(
+            &one,
+            root,
+            alt,
+            std_dir,
+            ce_steps,
+            ce_mem,
+            target,
+            test_build,
+            "",
+            &all,
+            0,
+            &mut cands,
+            &mut claims,
+        );
+        if base.is_none() || base.unwrap() < PROOF_FIX_MIN {
+            continue;
+        }
+        let mut none = Vector::<u64>::new();
+        let mut none2 = Vector::<u64>::new();
+        for c in 0..claims.len() {
+            let (s0, e0) = ((claims[c] >> 32) as usize, (claims[c] & 0xFFFFFFFFu64) as usize);
+            let mut t2 = String::from_str(t.slice(0, s0));
+            t2.push_str(t.slice(e0, t.len()));
+            if let Some(st) = proof_probe(
+                &one,
+                root,
+                alt,
+                std_dir,
+                ce_steps,
+                ce_mem,
+                target,
+                test_build,
+                &t2,
+                &all,
+                0,
+                &mut none,
+                &mut none2,
+            ) {
+                if st <= base.unwrap() {
+                    eprintln(
+                        "lint: {}:{}: no proof needs this 'assert' ({} -> {} solver steps without it)\n  = help: delete it if it only served a proof; keep it if it states a property of the code that each build should check",
+                        f,
+                        line_of(t, s0),
+                        base.unwrap(),
+                        st,
+                    );
+                }
+            }
+        }
+        let mut best = base.unwrap();
+        let mut text = text0.clone();
+        let mut removed: u32 = 0;
+        // From the last: a removal moves only the text after its start, and the end of a statement that
+        // holds it.
+        cands.sort();
+        let mut i = cands.len();
+        while i > 0 {
+            i -= 1;
+            let (s0, e0) = ((cands[i] >> 32) as usize, (cands[i] & 0xFFFFFFFFu64) as usize);
+            let mut t2 = String::from_str(text.as_str().slice(0, s0));
+            t2.push_str(text.as_str().slice(e0, text.len()));
+            if let Some(st) = proof_probe(
+                &one,
+                root,
+                alt,
+                std_dir,
+                ce_steps,
+                ce_mem,
+                target,
+                test_build,
+                &t2,
+                &all,
+                0,
+                &mut none,
+                &mut none2,
+            ) {
+                if st <= base.unwrap() {
+                    best = st;
+                    text = t2;
+                    removed += 1;
+                    for j in 0..i {
+                        let (s1, e1) = ((cands[j] >> 32) as usize, (cands[j] & 0xFFFFFFFFu64) as usize);
+                        if e1 > s0 {
+                            cands.set(j, s1 as u64 << 32 | (e1 - (e0 - s0)) as u64);
+                        }
+                    }
+                }
+            }
+        }
+        if removed == 0 {
+            continue;
+        }
+        if !write_source(f, &text) {
+            eprintln("lint: cannot write '{}'", f);
+            rc = 1;
+            continue;
+        }
+        fmt_one(f, false, true, false);
+        eprintln(
+            "lint: {}: removed the proof steps its proofs do not need ({}): {} -> {} solver steps",
+            f,
+            removed,
+            base.unwrap(),
+            best,
+        );
+    }
+    return rc;
+}
+
+/// `lint --proofs` shows a rewrite whose function and lemmas then prove in at most this share of the
+/// solver steps, in percent (`proof_hints`): a smaller gain is not worth a lemma.
+const PROOF_GAIN_PCT: u64 = 90;
+
+// `lint --proofs`: each rewrite of `p`'s proofs (`ProofLint.hints`) applied to its file, on top of the
+// rewrites before it that were kept: the warning with the rewrite printed, and the rewrite kept, when its
+// function and the lemmas of its kept rewrites then prove in PROOF_GAIN_PCT percent of the solver steps
+// before or fewer (the first time, of the function's in the lint); nothing for another. A rewrite changes
+// no contract, so a probe proves only these bodies (`Package.proof_only`), and stops past that share.
+// 1 when one prints, else 0.
+fn proof_hints(
+    p: &loader::Package,
+    root: str,
+    alt: str,
+    std_dir: str,
+    ce_steps: u32,
+    ce_mem: u64,
+    target: i32,
+    test_build: bool,
+) i32 {
+    let hs = &p.proof_lint.hints;
+    let mut rc = 0;
+    let mut k: usize = 0;
+    while k < hs.len() {
+        let mut e = k;
+        while e < hs.len() && hs.at(e).module == hs.at(k).module {
+            e += 1;
+        }
+        let m = hs.at(k).module as usize;
+        let f = p.modules[m].file.as_str();
+        let src = p.modules[m].source.as_str();
+        let mut one = Vector::<String>::new();
+        one.push(String::from_str(f));
+        let mut none = Vector::<u64>::new();
+        let mut none2 = Vector::<u64>::new();
+        let mut errs = diag::Errors::new();
+        let mut last = u32::MAX;
+        // The text with the rewrites kept, each kept edit (`hint_text`) to move the offsets of the later
+        // ones, and of the function under change: its item, steps, and the starts of its lemmas.
+        let mut cur = String::from_str(src);
+        let mut edits = Vector::<u64>::new();
+        let mut item = u32::MAX;
+        let mut best: u64 = 0;
+        let mut only = Vector::<u32>::new();
+        for j in k..e {
+            let h = hs.at(j);
+            if h.start == last {
+                continue;
+            }
+            last = h.start;
+            let mut at = [h.start, h.end, h.item];
+            for x in 0..3 {
+                at[x] = moved(edits[0..edits.len()], at[x]);
+            }
+            if h.item != item {
+                item = h.item;
+                best = h.steps;
+                only.clear();
+                only.push(0);
+            }
+            let mut ed: [u64; 3] = [0, 0, 0];
+            let t2 = hint_text(&cur, h, at[0], at[1], at[2], &mut ed);
+            if t2.len() == 0 {
+                continue;
+            }
+            // The call's offset in `t2`, and the lemmas': the kept ones move by the new one's edit.
+            let mut try_only = Vector::<u32>::new();
+            try_only.push((at[0] as u64 + (ed[1] & 0xFFFFFFFFu64)) as u32);
+            for q in 1..only.len() {
+                try_only.push(moved(ed[0..3], only[q]));
+            }
+            try_only.push(ed[0] as u32);
+            let cap = best * PROOF_GAIN_PCT / 100;
+            if let Some(st) = proof_probe(
+                &one,
+                root,
+                alt,
+                std_dir,
+                ce_steps,
+                ce_mem,
+                target,
+                test_build,
+                &t2,
+                &try_only,
+                cap,
+                &mut none,
+                &mut none2,
+            ) {
+                if st <= cap {
+                    errs.warn(h.code, h.start, h.end - h.start, h.msg.clone());
+                    let mut help = format(
+                        "state the claim as a lemma before the function and call it in place of the 'assert': the function and its lemmas then prove in {} solver steps, not {}{} (a call adds the lemma's 'ensures' as one fact)\n",
+                        st,
+                        best,
+                        pick(only.len() > 1, ", with the rewrites above", ""),
+                    );
+                    best = st;
+                    cur = t2;
+                    edits.extend_from_slice(ed[0..3]);
+                    only = try_only;
+                    for ln in h.lemma.as_str().split("\n") {
+                        help.push_str("            ");
+                        help.push_str(ln);
+                        help.push_byte(b'\n');
+                    }
+                    help.push_str("        and in place of the 'assert':\n            ");
+                    help.push_string(&h.call);
+                    errs.warn_help(help);
+                }
+            }
+        }
+        if errs.warns.len() != 0 {
+            errs.finalize(src, f);
+            errs.log();
+            rc = 1;
+        }
+        k = e;
+    }
+    return rc;
+}
+
+// Offset `v` of a text after the edits `ed` (triples of `hint_text`), in their order.
+const fn moved(ed: []u64, v: u32) u32 {
+    let mut x = v as u64;
+    for q in 0..ed.len() / 3 {
+        let grow = pick(x >= ed[3 * q + 2], ed[3 * q + 1] >> 32, 0);
+        x = x + pick(x >= ed[3 * q], ed[3 * q + 1] & 0xFFFFFFFFu64, 0) + grow & 0xFFFFFFFFu64;
+    }
+    return x as u32;
+}
+
+// The text of `src` with rewrite `h`, its offsets `start`, `end` and `item` in `src`: its lemma before the
+// item that holds the function (and the item's doc comments and attributes), its call in place of the
+// statement through its `;`. Empty when no `;` ends the statement. `ed`: where the edit moves an offset
+// of `src` (one at the lemma's place or after it moves by `ed[1]`'s low half, one at the statement's end
+// or after it also by its high half, the call's length less the statement's).
+fn hint_text(src: str, h: &loader::ProofHint, start: u32, end: u32, item: u32, ed: &mut [u64; 3]) String {
+    let mut e = end as usize;
+    while e < src.len() && (src.byte_at(e) == b' ' || src.byte_at(e) == b'\t' || src.byte_at(e) == b'\n') {
+        e += 1;
+    }
+    if e >= src.len() || src.byte_at(e) != b';' {
+        return String::new();
+    }
+    e += 1;
+    // The item's first line: the line of the function, or of the item that holds it (`extend`).
+    let mut ls = (item as usize).min(src.len());
+    while ls > 0 && src.byte_at(ls - 1) != b'\n' {
+        ls -= 1;
+    }
+    while ls > 0 && (src.byte_at(ls) == b' ' || src.byte_at(ls) == b'\t') {
+        ls -= 1;
+        while ls > 0 && src.byte_at(ls - 1) != b'\n' {
+            ls -= 1;
+        }
+    }
+    // Back over its doc comments and attributes.
+    while ls > 0 {
+        let mut p = ls - 1;
+        while p > 0 && src.byte_at(p - 1) != b'\n' {
+            p -= 1;
+        }
+        let ln = src.slice(p, ls);
+        if !ln.starts_with("///") && !ln.starts_with("@") {
+            break;
+        }
+        ls = p;
+    }
+    let mut t = String::from_str(src.slice(0, ls));
+    t.push_string(&h.lemma);
+    t.push_str("\n\n");
+    t.push_str(src.slice(ls, start as usize));
+    t.push_string(&h.call);
+    t.push_str(src.slice(e, src.len()));
+    let grow = (h.call.len() as i64 - (e as i64 - start as i64)) as u64 & 0xFFFFFFFFu64;
+    *ed = [ls as u64, grow << 32 | (h.lemma.len() + 2) as u64, e as u64];
+    return t;
+}
+
+// The 1-based line of offset `at` of `text`.
+const fn line_of(text: str, at: usize) usize {
+    let mut n: usize = 1;
+    for i in 0..at.min(text.len()) {
+        n += (text.byte_at(i) == b'\n') as usize;
+    }
+    return n;
+}
+
+// One `lint --proofs` of `files` (`text`, when not empty, the first one's source; `only`, when not empty,
+// the bodies to prove, `Package.proof_only`; `cap`, when not 0, the steps past which it stops,
+// `Package.proof_cap`), silent: the solver steps of its proofs, None when one fails or the files do not
+// check. The ghost statements of the listed
+// files into `cands` and `claims` (`proof_cands`).
+fn proof_probe(
+    files: &Vector<String>,
+    root: str,
+    alt: str,
+    std_dir: str,
+    ce_steps: u32,
+    ce_mem: u64,
+    target: i32,
+    test_build: bool,
+    text: str,
+    only: &Vector<u32>,
+    cap: u64,
+    cands: &mut Vector<u64>,
+    claims: &mut Vector<u64>,
+) Option<u64> {
+    let mut ovf = Vector::<String>::new();
+    let mut ovt = Vector::<String>::new();
+    if text.len() != 0 {
+        // The loader matches an overlay by its canonical path (`Package.overlay_files`).
+        let real = loader::real_path_of(files.at(0).as_str());
+        ovf.push(
+            if real.len() != 0 {
+                real
+            } else {
+                files.at(0).clone()
+            },
+        );
+        ovt.push(String::from_str(text));
+    }
+    unsafe diag::SILENT = true;
+    let mut q = lint_load_over(files, root, alt, std_dir, target, test_build, ovf, ovt);
+    if q.ok {
+        q.jobs = q.analysis_jobs(bsys::cpu_count());
+        if q.jobs == 1 {
+            prt::shutdown();
+        }
+        lint_settings(&mut q);
+        q.proof_only = only.clone();
+        q.proof_cap = cap;
+        let mut cirv = iri::interp_master((&mut q) as *mut loader::Package, ce_steps, ce_mem);
+        q.cir = &mut cirv;
+        let _ = lint_package(&mut q, target, 0, null, null, false);
+        q.cir = null;
+    }
+    unsafe diag::SILENT = false;
+    if !q.ok {
+        return None;
+    }
+    for m in 0..q.modules.len() {
+        if m < q.lint_set.len() && q.lint_set[m] && q.modules[m].has_ast {
+            proof_cands(&q, m, cands, claims);
+        }
+    }
+    return Some(q.proof_lint.spent);
+}
+
+// The ghost statements of module `m` of `q`, each `start << 32 | end` of its text, from its line's start
+// (where only blanks come before it) to past its `;` and the line's end: into `out` the proof steps (a
+// lemma's call statement; an `assert .. by { .. };` in a lemma or in another assert's block), into `claims`
+// the other asserts.
+fn proof_cands(q: &loader::Package, m: usize, out: &mut Vector<u64>, claims: &mut Vector<u64>) {
+    let a = q.module_ast_const(m as ModuleId);
+    let src = q.modules[m].source.as_str();
+    // The spans of the lemmas and of the asserts: an assert inside one is a proof step.
+    let mut steps_in = Vector::<u64>::new();
+    for k in 1..unsafe (*a).nnodes() {
+        let id = unsafe (*a).nth_id(k);
+        let n = unsafe (*a).at_const(id);
+        if n.kind == NodeKind::NODE_FUNCTION && unsafe (*a).ext(id).function.is_lemma() {
+            steps_in.push(n.span.start as u64 << 32 | n.span.end as u64);
+        } else if n.kind == NodeKind::NODE_BLOCK {
+            let (cs, ce) = unsafe (*a).contracts_of(id);
+            if ce > cs && unsafe (*a).contracts.at(cs as usize).kind == CT_ASSERT {
+                steps_in.push((unsafe (*a).contracts.at(cs as usize).at) as u64 << 32 | n.span.end as u64);
+            }
+        }
+    }
+    for k in 1..unsafe (*a).nnodes() {
+        let id = unsafe (*a).nth_id(k);
+        let n = unsafe (*a).at_const(id);
+        let mut start = u32::MAX;
+        let mut claim = false;
+        if n.kind == NodeKind::NODE_BLOCK {
+            let (cs, ce) = unsafe (*a).contracts_of(id);
+            if ce > cs && unsafe (*a).contracts.at(cs as usize).kind == CT_ASSERT {
+                start = unsafe (*a).contracts.at(cs as usize).at;
+                claim = true;
+                for j in 0..steps_in.len() {
+                    let (s1, e1) = ((steps_in[j] >> 32) as u32, steps_in[j] as u32);
+                    if s1 <= start && n.span.end <= e1 && !(s1 == start && e1 == n.span.end) {
+                        claim = false;
+                    }
+                }
+            }
+        } else if n.kind == NodeKind::NODE_EXPRESSION_STATEMENT {
+            let v = n.as_data.single.value;
+            if v != NODE_NONE && unsafe (*a).at_const(v).kind == NodeKind::NODE_CALL {
+                if let Some(ci) = unsafe (*a).call_info_of(v) {
+                    let dm = (ci >> 40) as usize;
+                    let dn = (ci >> 8 & 0xFFFFFFFFu64) as NodeId;
+                    if dm < q.modules.len() && q.modules[dm].has_ast && !Ast::in_body(dn) {
+                        let da = q.module_ast_const(dm as ModuleId);
+                        if unsafe (*da).valid(dn) && unsafe (*da).at_const(dn).kind == NodeKind::NODE_FUNCTION && unsafe (*da).ext(
+                            dn,
+                        ).function.is_lemma() {
+                            start = n.span.start;
+                        }
+                    }
+                }
+            }
+        }
+        if start == u32::MAX {
+            continue;
+        }
+        // Past the statement's `;` (an expression statement's span holds it), then the rest of its line
+        // when only blanks follow.
+        let mut e = n.span.end as usize;
+        if e == 0 || src.byte_at(e - 1) != b';' {
+            while e < src.len() && (src.byte_at(e) == b' ' || src.byte_at(e) == b'\t') {
+                e += 1;
+            }
+            if e >= src.len() || src.byte_at(e) != b';' {
+                continue;
+            }
+            e += 1;
+        }
+        let mut e2 = e;
+        while e2 < src.len() && (src.byte_at(e2) == b' ' || src.byte_at(e2) == b'\t') {
+            e2 += 1;
+        }
+        let mut s = start as usize;
+        if e2 < src.len() && src.byte_at(e2) == b'\n' {
+            let mut s2 = s;
+            while s2 > 0 && (src.byte_at(s2 - 1) == b' ' || src.byte_at(s2 - 1) == b'\t') {
+                s2 -= 1;
+            }
+            if s2 == 0 || src.byte_at(s2 - 1) == b'\n' {
+                s = s2;
+                e = e2 + 1;
+            }
+        }
+        if claim {
+            claims.push(s as u64 << 32 | e as u64);
+        } else {
+            out.push(s as u64 << 32 | e as u64);
+        }
+    }
+}
 
 const fn simp_cand_cmp(a: &SimpCand, b: &SimpCand) i32 {
     return pick(a.start < b.start, -1, pick(a.start > b.start, 1, 0));
@@ -1371,7 +1889,7 @@ enum Mode {
     MODE_BUILD, // `super-c build [<root.spc>] [-o out]`: emit + link a program (or build.toml)
     MODE_RELEASE, // `super-c release [<root.spc>] [-o out]`: emit + link a release profile program (or build.toml)
     MODE_FMT, // `super-c fmt [--check] [<path>...| -]` (no path: the whole project)
-    MODE_LINT, // `super-c lint [--fix] [--const] [<path>...]` (no path: the whole project)
+    MODE_LINT, // `super-c lint [--fix] [--const] [--proofs] [<path>...]` (no path: the whole project)
     MODE_COMMAND, // `super-c command <name>`: run a build.toml [command.NAME]
     MODE_RUN, // `super-c run [--profile=P]`: build the project, then execute its binary (cargo run)
     MODE_CLEAN, // `super-c clean [--full]`: sweep the global cache and build.toml outputs, or remove them
@@ -1634,6 +2152,9 @@ OPTIONS:
                            not need (checked: every expression keeps its type)
     --fix                  lint: apply machine-applicable fixes and re-lint
     --const                lint: also flag functions that could be 'const fn'
+    --proofs               lint: also prove the contracts and flag the costly asserts whose rewrite
+                           as a lemma proves the file in fewer steps (each rewrite proved);
+                           with --fix, remove the proof steps no proof needs
     --no-run               bench: build the bench binary but do not run it
     --dir=D                vendor: project root vendored into (default: the current directory)
     --ref=R                vendor: branch, tag or commit to pin (git sources)
@@ -1703,6 +2224,7 @@ pub(package) fn run(argv: Vector<str>, tools: Option<LintTools>) i32 {
     let mut fmt_simplify = false; // fmt -s: remove the turbofish lists and annotations bodies do not need
     let mut lint_fix = false; // lint --fix: apply machine fixes, re-lint to fixpoint
     let mut lint_sc = false; // lint --const: warn on functions the deep CTFE scan proves always evaluable
+    let mut lint_proofs = false; // lint --proofs: prove the contracts and warn on the costly proofs
     let mut bench_norun = false; // bench --no-run: build the bench binary only
     let mut bench_filter: str = ""; // bench --filter=S: build and run only benchmarks whose name contains S
     let mut extra = Vector::<usize>::new(); // argv indices of extra `fmt`/`lint` paths
@@ -1828,6 +2350,8 @@ pub(package) fn run(argv: Vector<str>, tools: Option<LintTools>) i32 {
                     lint_fix = true;
                 } else if arg == "--const" {
                     lint_sc = true;
+                } else if arg == "--proofs" {
+                    lint_proofs = true;
                 } else if arg.starts_with("--") {
                     co.reject(arg);
                 } else if file.len() == 0 {
@@ -2234,6 +2758,7 @@ pub(package) fn run(argv: Vector<str>, tools: Option<LintTools>) i32 {
                 }
             }
         }
+        unsafe LINT_PROOFS = lint_proofs;
         let rc = lint_project(&paths, whole, &co, &bo, cpu_set, &std_dir, lint_fix, lint_sc);
         if whole {
             if let Some(t) = tools {

@@ -1675,12 +1675,22 @@ extend Opt {
         self.unr.vabsd = pk.vec_absd;
         let cpu = pk.cpu_of(b);
         self.unr.vbits = cpu.vec_bits;
-        self.unr.vpopcnt = cpu.popcnt;
+        // A run-time copy level that counts bits in one instruction (`Package.copy_flags`) runs on the
+        // machines that have it (every x86-64 processor since 2008): a count it gets stays scalar there.
+        let mut copy_pop = false;
+        for k in 0..pk.copy_flags.len() {
+            copy_pop = copy_pop || (pk.copy_flags[k] & CPU_POPCNT) != 0;
+        }
+        self.unr.vpopcnt = cpu.popcnt || copy_pop;
         self.unr.vtbl = cpu.vtbl;
+        self.unr.vpred = cpu.vpred;
+        self.unr.vsve = pk.sve_byte && !cpu.vpred;
         self.unr.vmsk = pk.mask_bits;
         self.unr.vperm3 = cpu.vec_perm3;
+        self.unr.vld3 = pk.vec_ld3;
         self.unr.vsumw = pk.vec_sumw;
         self.unr.vmulw = cpu.vec_mulw;
+        self.unr.vdot = cpu.vec_dot;
         self.unr.vfma = pk.vfloat && cpu.fma;
         self.unr.vfloat = pk.vfloat;
         self.unr.vrnda = pk.vround_away;
@@ -12058,12 +12068,33 @@ extend Opt {
         return false;
     }
 
+    // Whether masked loads and stores through a pointer alone read mask bits `i`, each as an SVE predicate of
+    // the comparison that makes them (`pred_mask`; where the body has SVE, `vpred`, or the access runs only
+    // where the processor has it, `VOP_PRED`): the comparison stays, each access compares into its predicate.
+    fn pred_reads(self: &mut Self, b: &Body, i: u32, vpred: bool) bool {
+        let mut n: u32 = 0;
+        for j in 0..b.insts.len() as u32 {
+            let t = b.insts[j as usize];
+            lv::uses_edges(b, t, &mut self.uses);
+            for q in 0..self.uses.len() {
+                if self.uses[q] != i {
+                    continue;
+                }
+                if pred_mask(b, t).0 == C_COUNT || b.pool[(t.a + 1) as usize] != i || !vpred && (t.aux & VOP_PRED) == 0 {
+                    return false;
+                }
+                n += 1;
+            }
+        }
+        return n != 0;
+    }
+
     // Mask bits `t` (instruction `i` of block `k`) of a lane-wise comparison (`mask_cmp`), on a target that
     // makes no bits of a lane mask in one instruction (`Package.mask_bits`): the comparison's lane mask
     // (`O_VCMP`), widened until each lane holds its bit (`mask_width`; at most 64 bytes), ANDed with each
     // lane's bit (a wide constant, which leaves a loop) and summed (`reduce_add`). Whether it did.
     fn mask_sum(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, t: &mut Inst) bool {
-        if pk.mask_bits || !is_int(t.ty) {
+        if pk.mask_bits || !is_int(t.ty) || self.pred_reads(b, i, pk.cpu_of(b).vpred) {
             return false;
         }
         let mc = mask_cmp(b, i);
@@ -13109,7 +13140,12 @@ extend Opt {
                 quiet = quiet && (droppable(b.insts[j as usize]) || self.repl[j as usize] != VNONE);
             }
             let c2 = b.insts[ts.a as usize];
-            let outside = |v: Value| (v & (VPARAM | VFLAG)) != 0 && v != VNONE && self.pblock[(v & ~VPARAM) as usize] != s || (v & (VPARAM | VFLAG)) == 0 && v != VNONE && self.blk_of[v as usize] != s;
+            // A parameter's block, else its instruction's (an overflow flag's too).
+            let outside = |v: Value| v != VNONE && if (v & VPARAM) != 0 {
+                self.pblock[(v & ~VPARAM) as usize] != s
+            } else {
+                self.blk_of[(v & ~VFLAG) as usize] != s
+            };
             if !quiet || !outside(c2.a) || !outside(c2.b) {
                 continue;
             }
@@ -16954,9 +16990,15 @@ pub(package) struct Run {
     wargs: Vector<u64>,
     shape: Vector<bool>,
     always: Vector<bool>, // per body, whether its function is `@always_inline` (`Sym.always`)
+    // Per body, whether its one call is the only reference the package makes to it, and only its own
+    // unit may name it (`Sym.internal` or local, not `@used`): its copy there replaces it, so it inlines
+    // whatever its size (`il::IL_SOLE`), as LLVM's bonus for the last call of a local function does.
+    sole: Vector<bool>,
     unit: Vector<u32>,
     bunit: Vector<u32>, // per body, its function's `Sym.unit` (NONE: none)
     level: Vector<u32>,
+    // Per body, the body of its class it copies (`duplicates`), NONE for the one that runs the passes.
+    dup: Vector<u32>,
     // Per body, whether a caller may inline it: written by the body's job, read by its callers' jobs.
     ok: UnsafeCell<Vector<u8>>, // per body, its inliner facts (`il::facts`; 0: callers may not inline it)
     // Per body whose loop transforms or packing made vectors, or whose wide vectors split while a caller
@@ -17094,6 +17136,22 @@ extend Run {
         let hd = &p.held;
         let call_at = replace(&mut cs.at, Vector::<u32>::new());
         let calls = replace(&mut cs.callee, Vector::<u32>::new());
+        let mut refs = Vector::<u32>::new();
+        fill(&mut refs, n, 0u32);
+        for q in 0..calls.len() {
+            refs[calls[q] as usize] += 1;
+        }
+        let mut sole = Vector::<bool>::new();
+        fill(&mut sole, n, false);
+        for k in 0..n {
+            sole[k] = refs[k] == 1;
+        }
+        for s in 0..p.syms.len() {
+            let sy = p.syms[s];
+            if sy.kind == SK_FUNC && sy.def != NONE && (!sy.internal && sy.linkage != SL_LOCAL || sy.used) {
+                sole[sy.def as usize] = false;
+            }
+        }
         let mut shape = Vector::<bool>::with_capacity(n);
         shape.resize_default(n);
         let mut always = Vector::<bool>::with_capacity(n);
@@ -17139,7 +17197,7 @@ extend Run {
             let f = hd.flags[k - held as usize];
             shape[k] = (f & HELD_SHAPE) != 0;
             ok[k] = if (f & HELD_OK) != 0 {
-                il::facts(&bodies[k], cf.inline)
+                il::facts(&bodies[k], cf.inline) | sole[k] as u8 * il::IL_SOLE
             } else {
                 0u8
             };
@@ -17171,6 +17229,14 @@ extend Run {
         let ne = waits(n, &call_at, &calls, &level, &mut seen, &mut edges, false);
         edges.reserve_exact(ne);
         let _ = waits(n, &call_at, &calls, &level, &mut seen, &mut edges, true);
+        // Each copy waits for its class's first body: an edge forward in `order`, which keeps the bodies
+        // of a level by index.
+        let dup = duplicates(p, &bodies, held, &owner, &shape, &always, &sole, &bunit, &unit, &level);
+        for k in 0..held as usize {
+            if dup[k] != NONE {
+                edges.push(dup[k] as u64 << 32 | k as u64);
+            }
+        }
         let mut fin = Vector::<bool>::with_capacity(n);
         for k in 0..n {
             fin.push(k as u32 >= held);
@@ -17192,8 +17258,10 @@ extend Run {
             shape: shape,
             unit: unit,
             always: always,
+            sole: sole,
             bunit: bunit,
             level: level,
+            dup: dup,
             ok: UnsafeCell::<Vector<u8>>::new(ok),
             fin: psync::Mutex::<Vector<bool>>::new(fin),
             fin_cv: psync::Condvar::new(),
@@ -17211,9 +17279,10 @@ extend Run {
         };
     }
 
-    /// The estimated work of body `j`'s job: its instruction count (0 for a held body, which has none).
+    /// The estimated work of body `j`'s job: its instruction count (0 for a held body, which has none,
+    /// and for a copy).
     pub(package) const fn cost(self: &Self, j: u32) u64 {
-        if j >= self.held {
+        if j >= self.held || self.dup[j as usize] != NONE {
             return 0;
         }
         return (unsafe (*self.bodies.get())[j as usize].insts.len()) as u64;
@@ -17224,6 +17293,10 @@ extend Run {
     pub(package) fn job(self: &Self, j: u32) {
         let r = self;
         if j >= r.held {
+            return;
+        }
+        if r.dup[j as usize] != NONE {
+            r.copy_of(j);
             return;
         }
         let p = unsafe &*r.pk;
@@ -17498,9 +17571,9 @@ extend Run {
             unsafe *((*r.finals.get()).as_mut_ptr() + j as usize) = Some(Box::new(fin.compact()));
             recycle(&mut sc, fin);
         }
-        // An `@always_inline` body inlines whatever its size.
-        let facts = if fits && (il::bounded(b, r.cf.inline) || r.always[j as usize]) {
-            il::facts(b, r.cf.inline)
+        // An `@always_inline` body inlines whatever its size, as does one whose call is its only reference.
+        let facts = if fits && (il::bounded(b, r.cf.inline) || r.always[j as usize] || r.sole[j as usize]) {
+            il::facts(b, r.cf.inline) | r.sole[j as usize] as u8 * il::IL_SOLE
         } else {
             0u8
         };
@@ -17613,6 +17686,26 @@ extend Run {
         pool_give(&self.free_lock, &self.free, sc);
     }
 
+    // Body `j` as its class's first body `d` left it (`duplicates`; `d`'s job is done: an edge makes `j`
+    // wait for it): the passes give an identical body the same result. The writes go through references,
+    // which drop the values they replace.
+    fn copy_of(self: &Self, j: u32) {
+        let d = self.dup[j as usize] as usize;
+        let base = unsafe (*self.bodies.get()).as_mut_ptr();
+        let bj = unsafe &mut *(base + j as usize);
+        *bj = (unsafe &*(base + d)).compact();
+        let ok = unsafe (*self.ok.get()).as_mut_ptr();
+        unsafe *(ok + j as usize) = unsafe *(ok + d);
+        let fp = unsafe (*self.finals.get()).as_mut_ptr();
+        if let Some(f) = unsafe &*(fp + d) {
+            let fj = unsafe &mut *(fp + j as usize);
+            *fj = Some(Box::new(f.compact()));
+        }
+        let mut g = self.fin.lock();
+        g.get_mut()[j as usize] = true;
+        self.fin_cv.notify_all();
+    }
+
     /// Give the bodies back to `pk`, the package `new` took them from, in their final forms, their constant
     /// slots in read-only data (`const_slots`).
     pub(package) fn finish(self: &mut Self, pk: &mut Package) {
@@ -17647,6 +17740,15 @@ extend Run {
         let b = replace(pk.bodies.index_mut(k as usize), Body::empty());
         assert(b.lines.len() != 0, "hold: a body taken twice");
         return (b, true);
+    }
+
+    /// The bodies that take their class's result rather than run the passes (`duplicates`).
+    pub(package) const fn copies(self: &Self) usize {
+        let mut n: usize = 0;
+        for k in 0..self.dup.len() {
+            n += (self.dup[k] != NONE) as usize;
+        }
+        return n;
     }
 
     /// Whether body `k` passed the inliner's shape test, and whether its callers may inline it (after its
@@ -19395,66 +19497,6 @@ const fn droppable(t: Inst) bool {
     ));
 }
 
-// The lane mask whose bits value `v` of `b` is the sum of each lane's bit (`Optimizer::mask_sum`): the lane
-// mask a `reduce_add` of its AND with the lanes' bits reads. VNONE when it is none.
-const fn bits_mask(b: &Body, v: Value) Value {
-    if (v & (VPARAM | VFLAG)) != 0 || v == VNONE {
-        return VNONE;
-    }
-    let t = b.insts[v as usize];
-    if t.op != O_VOP || t.b != 1 || (t.aux & VOP_CODE) as u32 != core::OP_SIMD + core::SIMD_REDUCE_ADD as u32 {
-        return VNONE;
-    }
-    let a = b.pool[t.a as usize];
-    if (a & (VPARAM | VFLAG)) != 0 || b.insts[a as usize].op != O_AND {
-        return VNONE;
-    }
-    let at = b.insts[a as usize];
-    let wt = at.ty;
-    let n = lanes(wt);
-    let w = type_bytes(lane_type(wt), 8);
-    let mut words: [u64; 8] = [0; 8];
-    if n * w % 8 != 0 || !vec_words(b, at.b, wt, &mut words) || !lane_mask(b, at.a, 4) {
-        return VNONE;
-    }
-    let per = 8 / w;
-    for qw in 0..n * w / 8 {
-        let mut word: u64 = 0;
-        for l in 0..per {
-            word |= 1u64 << (qw * per + l) as u64 << (8 * w * l) as u64;
-        }
-        if words[qw as usize] != word {
-            return VNONE;
-        }
-    }
-    return at.a;
-}
-
-// The comparison whose mask bits value `m` of `b` is: a `vop` comparison (`SIMD_CMP_EQ` .. `SIMD_CMP_GE`)
-// of two vectors of one type, of a condition one `O_VCMP` takes; its condition and operands.
-const fn mask_cmp(b: &Body, m: Value) Option<(u16, Value, Value)> {
-    if (m & (VPARAM | VFLAG)) != 0 || m == VNONE {
-        return None;
-    }
-    let t = b.insts[m as usize];
-    let code = (t.aux & VOP_CODE) as u32;
-    if t.op != O_VOP || t.b != 2 || t.c != VNONE || code < core::OP_SIMD + core::SIMD_CMP_EQ as u32 || code > core::OP_SIMD + core::SIMD_CMP_GE as u32 {
-        return None;
-    }
-    let p = b.pool[t.a as usize];
-    let q = b.pool[(t.a + 1) as usize];
-    let tp = b.type_of(p);
-    if !is_vec(tp) || b.type_of(q) != tp || is_vec(t.ty) {
-        return None;
-    }
-    let lt = lane_type(tp);
-    let c = simd_cond((code - core::OP_SIMD) as u8, (t.aux & VOP_SIGNED) != 0, is_float(lt));
-    if !vcmp_ok(c, lt) {
-        return None;
-    }
-    return Some((c, p, q));
-}
-
 // ---- Folding ------------------------------------------------------------------------------------------
 
 // `umax_of` looks through at most UMAX_DEPTH instructions.
@@ -19876,13 +19918,23 @@ const fn ext_from(b: &Body, v: Value, ty: u8) Value {
 
 // Lane access `i` of `b` (`O_VEXTRACT`, `O_VINSERT`) through the lanes it reads: a lane of a splat is its
 // scalar; a lane of an insert is the inserted scalar, or the same lane of the vector inserted into; an
-// insert of a vector's own lane is the vector; an insert into an insert of the same lane replaces it. The
-// value it equals, else VNONE (and maybe `i` rewritten in place).
+// insert of a vector's own lane is the vector; inserts of every lane of one vector, each into its own
+// lane, are that vector (`rebuilt`); an insert into an insert of the same lane replaces it. The value it
+// equals, else VNONE (and maybe `i` rewritten in place).
 const fn lane_fold(b: &mut Body, i: u32) Value {
     let mut t = b.insts[i as usize];
     if t.op == O_VINSERT {
         if (t.b & (VPARAM | VFLAG)) == 0 && b.insts[t.b as usize].op == O_VEXTRACT && b.insts[t.b as usize].a == t.a && b.insts[t.b as usize].aux == t.aux {
             return t.a;
+        }
+        let (w, mark) = rebuilt(b, i);
+        if w != VNONE && !mark {
+            return w;
+        }
+        if w != VNONE {
+            // A secret mark on a lane marks the vector: the constant-time check derives the same secrets.
+            b.insts[i as usize] = Inst { op: O_SECRET, ty: t.ty, aux: 0, a: w, b: VNONE, c: VNONE };
+            return VNONE;
         }
         if (t.a & (VPARAM | VFLAG)) == 0 && b.insts[t.a as usize].op == O_VINSERT && b.insts[t.a as usize].aux == t.aux {
             t.a = b.insts[t.a as usize].a;
@@ -19931,6 +19983,56 @@ const fn lane_fold(b: &mut Body, i: u32) Value {
         b.insts[i as usize] = t;
     }
     return VNONE;
+}
+
+// The vector `w` whose every lane insert `i` of `b` and the inserts under it put back into the same lane
+// (`O_VEXTRACT` of `w`, under a secret mark or not, the outermost insert of each lane counting), and
+// whether a mark was among them; VNONE when another value fills a lane or one is left.
+const fn rebuilt(b: &Body, i: u32) (Value, bool) {
+    let t = b.insts[i as usize];
+    let n = lanes(t.ty);
+    if n > LANE_WALK {
+        return VNONE, false;
+    }
+    let all = if n == 64 {
+        ~0u64
+    } else {
+        (1u64 << n as u64) - 1
+    };
+    let mut set: u64 = 0;
+    let mut w = VNONE;
+    let mut mark = false;
+    let mut v = i;
+    // Each step leaves one insert: at most LANE_WALK.
+    for _ in 0..LANE_WALK {
+        if set == all || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_VINSERT {
+            break;
+        }
+        let s = b.insts[v as usize];
+        v = s.a;
+        let bit = 1u64 << s.aux as u64;
+        if (set & bit) != 0 {
+            continue;
+        }
+        set |= bit;
+        let mut x = s.b;
+        if (x & (VPARAM | VFLAG)) != 0 {
+            return VNONE, false;
+        }
+        if b.insts[x as usize].op == O_SECRET {
+            mark = true;
+            x = b.insts[x as usize].a;
+            if (x & (VPARAM | VFLAG)) != 0 {
+                return VNONE, false;
+            }
+        }
+        let e = b.insts[x as usize];
+        if e.op != O_VEXTRACT || e.aux != s.aux || b.type_of(e.a) != t.ty || w != VNONE && e.a != w {
+            return VNONE, false;
+        }
+        w = e.a;
+    }
+    return ast::pick(set == all, w, VNONE), mark;
 }
 
 // Whether float `v` of `b` is the result of an arithmetic operation or a conversion, so no signaling NaN.
@@ -20207,38 +20309,6 @@ const fn lanes_are(b: &Body, v: Value, vt: u8, k: u64) bool {
     return true;
 }
 
-// The 8-byte words of vector constant `v` of `b` of type `vt` (a multiple of 8 bytes, at most 64), in
-// `out`: a wide constant's, or a splat of an integer constant's. Whether it is one.
-const fn vec_words(b: &Body, v: Value, vt: u8, out: &mut [u64; 8]) bool {
-    if (v & (VPARAM | VFLAG)) != 0 {
-        return false;
-    }
-    let t = b.insts[v as usize];
-    let nw = type_bytes(vt, 8) / 8;
-    if t.op == O_WCONST && t.b == nw {
-        for q in 0..nw {
-            out[q as usize] = b.words[(t.a + q) as usize];
-        }
-        return true;
-    }
-    if t.op != O_SPLAT {
-        return false;
-    }
-    let c = int_bits(b, t.a);
-    if c.is_none() {
-        return false;
-    }
-    let bits = 8 * type_bytes(lane_type(vt), 8);
-    let mut w: u64 = 0;
-    for l in 0..64 / bits {
-        w |= trunc_bits(c.unwrap(), bits) << (l * bits) as u64;
-    }
-    for q in 0..nw {
-        out[q as usize] = w;
-    }
-    return true;
-}
-
 // `marked` follows at most MARK_DEPTH operations.
 const MARK_DEPTH: u32 = 6;
 
@@ -20290,6 +20360,10 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             b.insts[t.a as usize].a,
         ) == t.ty {
             return b.insts[t.a as usize].a;
+        }
+        // A choice of vectors on a constant, or between one vector and itself: that vector.
+        if t.op == O_SELECT && (int_bits(b, t.a).is_some() || t.b == t.c) {
+            return ast::pick(t.b == t.c || int_bits(b, t.a).unwrap() != 0, t.b, t.c);
         }
         // Integer lanes plus, minus, `or` or `xor` a vector of zeros: the other operand.
         if is_int(lane_type(t.ty)) && (t.op == O_ADD || t.op == O_SUB || t.op == O_OR || t.op == O_XOR) {
@@ -22199,7 +22273,7 @@ const fn pure_ops() [bool; 256] {
     for k in 0..256u32 {
         let op = k as u8;
         unsafe {
-            t[k as usize] = op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_FMA || op == O_MULHU || op == O_MULHS || op == O_BSWAP || op == O_BITREV || op >= O_CLZ && op <= O_POPCNT || op == O_SPLAT || op == O_VCMP || op == O_VSEL || op == O_VUNZIP || op == O_HTOF || op == O_FTOH || op == O_FSQRT || op == O_VZIPLO || op == O_VZIPHI || op == O_VEXTRACT || op == O_VINSERT || op == O_VSUMW || op == O_VMULW || op == O_SECRET || op == O_PUBLIC;
+            t[k as usize] = op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_FMA || op == O_MULHU || op == O_MULHS || op == O_BSWAP || op == O_BITREV || op >= O_CLZ && op <= O_POPCNT || op == O_SPLAT || op == O_VCMP || op == O_VSEL || op == O_VUNZIP || op == O_HTOF || op == O_FTOH || op == O_FSQRT || op == O_VZIPLO || op == O_VZIPHI || op == O_VEXTRACT || op == O_VINSERT || op == O_VSUMW || op == O_VMULW || op == O_VDOT || op == O_SECRET || op == O_PUBLIC;
         }
     }
     return t;
@@ -23471,6 +23545,77 @@ const fn args_among(b: &Body, e: u32, o: u32) bool {
         }
     }
     return true;
+}
+
+// Per body, the body of its class it copies, NONE for the first of a class and for every other body. A
+// class holds the identical bodies (`Body::same`) of instances (not `Sym.own`: every build lowers them, so a
+// cached unit never reads the classes) at one level, with the same inliner shape, unit, function attributes
+// and whether a call is the only reference (`Run.sole`): the passes read nothing else of a body
+// (`Run::job`), so each gives them the same result and inliner facts.
+fn duplicates(
+    p: &Package,
+    bodies: &Vector<Body>,
+    held: u32,
+    owner: &Vector<u32>,
+    shape: &Vector<bool>,
+    always: &Vector<bool>,
+    sole: &Vector<bool>,
+    bunit: &Vector<u32>,
+    unit: &Vector<u32>,
+    level: &Vector<u32>,
+) Vector<u32> {
+    let mut dup = Vector::<u32>::new();
+    fill(&mut dup, bodies.len(), NONE);
+    let mut keys = Vector::<u128>::new();
+    for k in 0..held as usize {
+        if owner[k] == NONE {
+            continue;
+        }
+        let y = p.syms[owner[k] as usize];
+        let b = &bodies[k];
+        if y.own || b.naked || b.insts.len() == 0 {
+            continue;
+        }
+        let mut h = mix(mix(b.insts.len() as u64, b.blocks.len() as u64), b.sig);
+        for i in 0..b.insts.len() {
+            let t = b.insts[i];
+            h = mix(
+                mix(h, t.op as u64 | t.ty as u64 << 8 | t.aux as u64 << 16 | t.a as u64 << 32),
+                t.b as u64 | t.c as u64 << 32,
+            );
+        }
+        for i in 0..b.syms.len() {
+            h = mix(h, b.syms[i]);
+        }
+        keys.push(h as u128 << 32 | k as u64);
+    }
+    keys.sort();
+    // The first bodies of the classes of one hash, by index.
+    let mut firsts = Vector::<u32>::new();
+    for i in 0..keys.len() {
+        if i == 0 || keys[i] >> 32 != keys[i - 1] >> 32 {
+            firsts.truncate(0);
+        }
+        let k = (keys[i] & 0xFFFFFFFF) as usize;
+        let a = p.syms[owner[k] as usize];
+        let mut d = NONE;
+        for f in firsts.iter() {
+            let c = (*f) as usize;
+            let o = p.syms[owner[c] as usize];
+            if level[c] == level[k] && shape[c] == shape[k] && always[c] == always[k] && sole[c] == sole[k] && bunit[c] == bunit[k] && unit[c] == unit[k] && o.linkage == a.linkage && o.sect == a.sect && o.used == a.used && o.noinline == a.noinline && o.cold == a.cold && o.sec == a.sec && o.internal == a.internal && o.ext == a.ext && bodies[c].same(
+                &bodies[k],
+            ) {
+                d = c as u32;
+                break;
+            }
+        }
+        if d == NONE {
+            firsts.push(k as u32);
+        } else {
+            dup[k] = d;
+        }
+    }
+    return dup;
 }
 
 // The edges of the bodies' job graph (`Run::edges`), pushed onto `edges` when `list`; their count. A caller

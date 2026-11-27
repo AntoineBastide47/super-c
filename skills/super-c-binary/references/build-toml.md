@@ -12,6 +12,9 @@ target-cpu = "x86-64-v2"     # x86_64 level before the feature lists (skipped on
 simd-width = 256             # vector width the planner prefers on AVX-512: 256 or 512
 simd-dispatch = "x86-64-v3"  # x86_64: levels of the run-time copies of vector code, or "off"
 std_internals = true         # the project names std's unstable `pub(package)` items (std::platform); the compiler sets it
+prove-steps = 8000000        # the steps (blocks walked and solver steps) the proof of one function outside
+                             # std may spend (default 4000000; past it, error "exceeds its step budget");
+                             # lint and the language server read it too
 
 [lib]                        # library target (optional; root defaults to src/lib.spc,
 type = ["static", "shared"]  # type defaults to static; a shared library records its own file name
@@ -102,6 +105,7 @@ native object's key.
 | `fast-math` | | `associative-math`, `reciprocal-math`, `finite-math-only`, `-fno-signed-zeros` and `fp-contract=fast` (`-ffp-contract=off` clears it), each its own flag too. The prover gives each float operation every value they let the optimizer compute (`super-c-language`, basics: floats): a reassociated sum or product keeps only its order against an operand that may be a partial result, a quotient may be a product by the reciprocal, a sum with a product may be fused, a zero may take either sign, an ordered comparison of a NaN is unknown |
 | `stack-protector`, `-strong`, `-all` | | A canary between a function's stack memory and its saved registers, checked before it returns: functions with a slot of 8 bytes or more, with any slot, or all; one at a time (`-fno-stack-protector` clears them). The native build counts a slot only when a block that may return reads its address: a slot only failure paths use (a panic's message) adds no canary (`lir::verify::protected`) |
 | `function-sections`, `data-sections` | 1, 2, 3, s, z | A section per function or variable, and the link drops what nothing reaches from the entry, the exports and the kept symbols (the build adds `-Wl,-dead_strip` on Mach-O, `-Wl,--gc-sections` elsewhere) |
+| `fold-functions` | 1, 2, 3, s, z | With the link's GC, the link keeps one copy of identical functions whose address nothing takes (the build adds `-Wl,--icf=safe`, LLD's `--icf=safe`): a call or jump takes no address; any other reference, an export, the entry or a kept symbol does, so functions a program compares by address stay apart. A folded function's symbol names its copy's address |
 | `plt` | 0 to z | `-fno-plt`, ELF: a call of an extern declaration's function loads its address from its GOT slot; the x86-64 link turns one whose target the output defines into a direct call |
 | `prove` | 0 to z | The prover checks every contract (`requires`, `ensures`, `decreases`, loop `invariant`) and every `@prove_exhaustive` function, and every conversion into a pattern type the checker cannot decide, and fails the build on one it cannot prove (error 538); a bounds check it proves is removed, and a proved `requires` that compares a parameter with a constant gives the optimizer the parameter's range. `-fno-prove` skips the proofs: no check is removed, no `requires` gives a range, and each such conversion is checked at run time |
 | `contract-checks` | | The contract checks of the program's modules also run (a std module's clauses are proved only: they may name spec functions): a false clause traps with "assertion failed: `<clause>`", a conversion into a pattern type with "assertion failed: `<value>`". Off, a build emits no check and its output is byte-identical to the same program without contracts |
@@ -111,13 +115,18 @@ At 1, 2 and 3 a loop whose header test has at most 8 instructions also rotates (
 end); `loop_budgets` in `src/driver/emit.spc` holds the budgets. `-march=C` is `--target-cpu=C`.
 
 A build tree records the proofs that held (`__sc_prove`, `prove_cached` in `src/driver/emit.spc`): one
-key per module whose obligations all held, over the module's source, the sources of every module it
-imports or names (transitively) and of the prelude, the compiler identity, the target, the
-architecture, the level and the flags. A later build skips the proofs of each module whose key the
-record holds; a failed obligation is never recorded. A module the tree's record misses reads the
-shared record of its key in the cache base (`<base>/.prove/<key>`, `shared_record`), which every tree
-of any project shares, and writes it once its proofs held: a second tree of the same sources proves
-nothing again. `SC_CEMIT_STATS=1` prints
+key per module whose obligations all held, over the module's source, the shapes (`tuc::Shapes`: the
+text outside the function bodies) of every module it imports or names (transitively), the functions
+the type check's evaluations ran for each of those modules (`tuc::ce_sites`: a constant's value), the
+prelude's sources, the bodies the build keeps of the module and their recursion components, the
+compiler identity, the target, the architecture, the level and the flags, and outside std `prove-steps`. Each key's `@d` lines list
+the functions of other modules whose bodies its proofs read (`prv::check_kept`: a callee's parameter
+writes, `ensures` chains, ownership), each with its text's hash (`tuc::body_hash`). A later build skips
+the proofs of each module whose key the record holds while each of its `@d` lines still holds; a failed obligation is never recorded. A `@prove_exhaustive` function's module reads every
+module. A module the tree's record misses reads the shared record of its key in the cache base
+(`<base>/.prove/<key>`, `shared_record`, its `@d` lines by file), which every tree of any
+project shares, and writes it once its proofs held: a second tree of the same sources proves nothing
+again. `SC_CEMIT_STATS=1` prints
 `prove: <n> to prove, <k> from the proof record, <w> workers` (`<w>`: the workers the proofs run on).
 
 ### Build cache
@@ -223,6 +232,10 @@ by `std::cpu::Feature`; the C flag column is what the C tree of `--emit-c` compi
 | `vpclmulqdq` | x86_64 | `avx`, `pclmulqdq` | `-mvpclmulqdq` | off |
 | `aes` | x86_64 | `sse2` | `-maes` | off |
 | `pclmulqdq` | x86_64 | `sse2` | `-mpclmul` | off |
+| `sha` | x86_64 | `sse2` | `-msha` | off |
+| `sha512` | x86_64 | `avx2` | `-msha512` | off |
+| `amx-tile` | x86_64 | | `-mamx-tile` | off |
+| `amx-int8` | x86_64 | `amx-tile` | `-mamx-int8` | off |
 | `avx10.1` | x86_64 | `x86-64-v4`, `avx512vbmi` to `avx512fp16` | `-mavx10.1` | off |
 | `avx10.2` | x86_64 | `avx10.1` | `-mavx10.2` | off |
 | `neon` | aarch64 | | | always on |
@@ -232,15 +245,22 @@ by `std::cpu::Feature`; the C flag column is what the C tree of `--emit-c` compi
 | `i8mm` | aarch64 | `neon`, `rdm` | `+i8mm` | off |
 | `bf16` | aarch64 | `neon`, `rdm` | `+bf16` | off |
 | `aes` | aarch64 | `neon` | `+aes` | macOS, iOS |
+| `pmull` | aarch64 | `neon`, `aes` | `+aes` | macOS, iOS |
 | `sha2` | aarch64 | `neon` | `+sha2` | macOS, iOS |
 | `sha3` | aarch64 | `neon`, `rdm`, `sha2` | `+sha3` | macOS |
+| `sha512` | aarch64 | `neon`, `sha2` | `+sha3` | macOS |
 | `crc` | aarch64 | | `+crc` | macOS |
 | `lse` | aarch64 | | `+lse` | macOS |
+| `rcpc` | aarch64 | `neon`, `rdm` | `+rcpc` | macOS |
+| `cssc` | aarch64 | `neon`, `rdm` | `+cssc` | off |
 | `sve` | aarch64 | `fp16`, `rdm` | `+sve` | off |
 | `sve2` | aarch64 | `sve` | `+sve2` | off |
 | `sme` | aarch64 | `neon`, `rdm` | `+sme` | off |
 | `sme2` | aarch64 | `sme` | `+sme2` | off |
 | `sme-f64f64` | aarch64 | `sme` | `+sme-f64f64` | off |
+
+Two instruction sets share the name `sha512`: arm64's is `cpu::Feature::Sha512`, x86-64's
+`cpu::Feature::Sha512ni`.
 
 The x86_64 baseline is `sse2` and, by platform, what the table's last column names (macOS and
 the iOS simulator: `core2`, which every C compiler for them assumes; Android: its ABI). The x86-64 psABI levels
@@ -257,8 +277,10 @@ flags are `-march=x86-64-vN` for the highest level the set holds, else `-march=x
 
 The aarch64 baseline depends on the platform: macOS has every feature of Apple clang's default
 CPU (`apple-m1`, the oldest Apple silicon Mac); iOS those of its default CPU (`apple-a7`, which
-the iOS 13 floor still allows); Linux, Android and Windows `neon` alone. `sve` and `sve2` are
-detected only: no vector operation uses them, and no macOS or iOS build takes them (no Apple core
+the iOS 13 floor still allows); Linux, Android and Windows `neon` alone. `sve` (which `sve2`
+implies) keeps vectors at NEON's 16 bytes and runs masked loads and stores through SVE predicates:
+the vectorizer's masked last iterations and masked accesses whose mask is a lane comparison
+(super-c-compiler-internals `references/lir.md`); no macOS or iOS build takes them (no Apple core
 has them). `sme`, `sme2` and `sme-f64f64` are detected (Apple M4 and later, Armv9.2 cores) and
 select C kernels that enter streaming mode themselves; no vector operation uses them, and outside
 streaming mode an SME core may lack SVE (Apple M4 and M5), so a build that enables them must not
@@ -306,7 +328,8 @@ build's does not, a call of a function with vector code that states no features 
 compiled with the same set (`<symbol>__fs<hex>`,
 in the callee module's instance file), whose calls do the same.
 
-On x86_64 each function with vector code and no features of its own also gets a copy per level of
+On x86_64 each function with vector code and no features of its own (one that holds a vector value, or
+calls a small vector function inside a loop) also gets a copy per level of
 `--simd-dispatch=L` (build.toml `simd-dispatch`; a comma list of `x86-64-v2` .. `x86-64-v4`, default
 `x86-64-v3` in a profile at opt-level 2 or more, `off` at 0 or 1 (`debug`, `test`: the copies make
 the compile of vector code longer) and in a script build without `--profile`;
@@ -316,6 +339,16 @@ detector's answer, read once per TU of the C tree; in a native build a byte a co
 `main`, 0 (no copy) until then). A copy calls copies, so one check runs where code without the
 features enters vector code; a build at a level above the list makes none. The level list is part
 of the emit stamp. `SC_SIMD_LEVEL=<k>` (a test switch) sets the level the checks read.
+
+The same levels give the native code's scalar copies: on x86_64 a function where the level's scalar
+instructions (POPCNT, LZCNT, BMI1, FMA) save one instruction in eight of a loop, or of a small body, gets
+a copy per level, chosen by the same byte; on Linux arm64 the target's own levels apply whatever the
+list names (LSE and RCPC, then CSSC too, read from HWCAP at start-up) for atomics, bit counts and
+trailing zeros. A native Linux arm64 build without `sve` also tests SVE at start-up (HWCAP_SVE into
+the byte `__sc_sve`): a vector loop of 8 lanes or more runs the elements its vectors leave as one
+SVE-predicated iteration where the CPU has it, the scalar loop elsewhere, with no copy of the function. `--simd-dispatch=off` and opt-level 0 or 1 make none of these. On Windows arm64 (a C tree) the
+atomics go through compiler-rt's helpers (`-moutline-atomics` in `__cflags`), which pick LSE by the CPU,
+unless the build has `+lse`.
 
 `std::cpu::detect` reads the features of the machine a program runs on (`ffi/sc_cpu.spc`), with
 the build's set included: a program can choose code at run time, never a result.
@@ -340,7 +373,7 @@ the build's set included: a program can choose code at run time, never a result.
 | `--target-feature=L` | CPU features, a comma list of `+name`/`-name` applied after build.toml's `target-features` (see CPU features above) |
 | `--target-cpu=L` | x86_64 level (`x86-64`, `x86-64-v2`, `x86-64-v3`, `x86-64-v4`) applied before every feature list; replaces build.toml's `target-cpu` |
 | `--simd-width=W` | Vector width the planner prefers on AVX-512: `256` (default) or `512` |
-| `--simd-dispatch=L` | x86_64: the levels of the run-time copies of vector code (comma list of `x86-64-v2` .. `x86-64-v4`, default `x86-64-v3` at opt-level 2 or more, `off` below and for a script without `--profile`), or `off`; replaces build.toml's `simd-dispatch` |
+| `--simd-dispatch=L` | x86_64: the levels of the run-time copies of vector code and of the scalar copies (comma list of `x86-64-v2` .. `x86-64-v4`, default `x86-64-v3` at opt-level 2 or more, `off` below and for a script without `--profile`), or `off`, which also turns off Linux arm64's LSE, RCPC and CSSC copies and its start-up SVE test; replaces build.toml's `simd-dispatch` |
 | `--bootstrap-tags` | Enable `@platform` bootstrap tag gating; accept unknown attributes, and a std `@intrinsic` this compiler does not know (its declaration and the std bodies that call it go unchecked; emitting such a body fails); a manifest build also skips build.toml sections and keys this compiler does not know (a previous release building newer source) |
 | `--no-lint` | Disable lint pass |
 | `--const-eval-steps=N` | Cap compile-time evaluation steps (~2M default) |

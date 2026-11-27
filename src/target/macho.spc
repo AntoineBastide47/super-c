@@ -33,6 +33,7 @@ const N_SECT: u8 = 0xE;
 pub(package) const N_PEXT: u8 = 0x10;
 const N_NO_DEAD_STRIP: u32 = 0x20;
 const N_WEAK_DEF: u32 = 0x80;
+const N_ALT_ENTRY: u32 = 0x200;
 
 // The section types and attributes a `segment,section,type,attributes` name spells, as the assembler
 // reads them.
@@ -435,7 +436,7 @@ pub(package) fn write(o: &mut ob::Obj, out: &mut Vector<u8>) {
                     (y.flags & ob::SF_WEAK) != 0,
                     N_WEAK_DEF,
                     0,
-                ),
+                ) | ast::pick((y.flags & ob::SF_ALT) != 0, N_ALT_ENTRY, 0),
             );
             ob::w64(&mut nl, addr[(si - 1) as usize] + y.off);
         }

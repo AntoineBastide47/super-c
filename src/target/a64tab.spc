@@ -71,6 +71,7 @@ extend Q {
 pub(package) const QWX: u8 = 3;
 pub(package) const QSD: u8 = 3; // Q::FT: s and d
 pub(package) const QALL: u8 = 0x0F; // Q::Z: every element
+pub(package) const QZF: u8 = 0x0E; // Q::Z: h s d (the float elements)
 pub(package) const QV_NO1D: u8 = 0xBF; // Q::V: every arrangement but 1d
 pub(package) const QV_NOD: u8 = 0x3F; // Q::V: no 64-bit lanes
 pub(package) const QVF_ALL: u8 = 0x0B; // Q::VF: 2s 4s 2d
@@ -108,10 +109,11 @@ extend C {
     pub(package) const V4S: u8 = 21;
     pub(package) const V1D: u8 = 22;
     pub(package) const V2D: u8 = 23;
+    pub(package) const ZH: u8 = 24; // an SVE register of halfwords, whatever the variant
 }
 
-/// Operand kinds: the register kinds 1 to 64 and 161 to 192 (the fixed arrangements), then the special
-/// ones (the comment gives the values each consumes).
+/// Operand kinds: the register kinds 1 to 64, 161 to 192 (the fixed arrangements) and 205 to 208 (`C::ZH`),
+/// then the special ones (the comment gives the values each consumes).
 pub(package) struct K {}
 
 extend K {
@@ -224,6 +226,7 @@ extend K {
     pub(package) const VLX: u8 = 139; // vlx2 or vlx4 at 13
     pub(package) const SMSM: u8 = 140; // `sm`, no bits
     pub(package) const SMZA: u8 = 141; // `za`, no bits
+    pub(package) const SIMM5: u8 = 142; // at 16, signed
     pub(package) const ELB: u8 = 143; // Vn.b[i]: Rn at 5, the index in imm5 at 16: (reg, index)
     pub(package) const ELH: u8 = 144;
     pub(package) const ELS: u8 = 145;
@@ -262,6 +265,8 @@ extend K {
     pub(package) const V4SD: u8 = 181;
     pub(package) const V4SN: u8 = 182;
     pub(package) const V4SM: u8 = 184;
+    pub(package) const V1DN: u8 = 186;
+    pub(package) const V1DM: u8 = 188;
     pub(package) const V2DD: u8 = 189;
     pub(package) const V2DN: u8 = 190;
     pub(package) const V2DM: u8 = 192;
@@ -270,7 +275,13 @@ extend K {
     pub(package) const SHL32: u8 = 195;
     pub(package) const IMM6X: u8 = 196; // at 10
     pub(package) const BMASK: u8 = 197; // a 64-bit value of 0 or 0xFF bytes, a bit per byte: abc at 16, defgh at 5
-    pub(package) const COUNT: u8 = 198;
+    pub(package) const SIMM8: u8 = 198; // at 10, signed
+    pub(package) const UIMM8: u8 = 199; // at 10, unsigned
+    pub(package) const V1QD: u8 = 200; // Vd.1q at 0 (`pmull`'s 128-bit product)
+    pub(package) const ZHD: u8 = 205;
+    pub(package) const ZHN: u8 = 206;
+    pub(package) const ZHM: u8 = 208;
+    pub(package) const COUNT: u8 = 209;
 }
 
 // Register kinds 1 to 64: a class (`(k - 1) / 4`) and a field (`(k - 1) % 4`: bits 0, 5, 10, 16).
@@ -317,7 +328,7 @@ pub(package) const fn kind_at(ops: u64, i: u32) u8 {
 
 // ---- The table ----
 
-pub(package) const ROWS: [Row; 664] = [
+pub(package) const ROWS: [Row; 716] = [
     // Add and subtract, immediate.
     rf("mov", 0x11000000, Q::SF, QWX, k2(K::RDS, K::RNS), FL_SPMOV),
     r("cmp", 0x7100001F, Q::SF, QWX, k2(K::RNS, K::AIMM)),
@@ -421,6 +432,15 @@ pub(package) const ROWS: [Row; 664] = [
     r("lsrv", 0x1AC02400, Q::SF, QWX, k3(K::RD, K::RN, K::RM)),
     r("asrv", 0x1AC02800, Q::SF, QWX, k3(K::RD, K::RN, K::RM)),
     r("rorv", 0x1AC02C00, Q::SF, QWX, k3(K::RD, K::RN, K::RM)),
+    // FEAT_CSSC: the minimum and maximum of two registers, and of a register and an 8-bit immediate.
+    r("smax", 0x1AC06000, Q::SF, QWX, k3(K::RD, K::RN, K::RM)),
+    r("umax", 0x1AC06400, Q::SF, QWX, k3(K::RD, K::RN, K::RM)),
+    r("smin", 0x1AC06800, Q::SF, QWX, k3(K::RD, K::RN, K::RM)),
+    r("umin", 0x1AC06C00, Q::SF, QWX, k3(K::RD, K::RN, K::RM)),
+    r("smax", 0x11C00000, Q::SF, QWX, k3(K::RD, K::RN, K::SIMM8)),
+    r("umax", 0x11C40000, Q::SF, QWX, k3(K::RD, K::RN, K::UIMM8)),
+    r("smin", 0x11C80000, Q::SF, QWX, k3(K::RD, K::RN, K::SIMM8)),
+    r("umin", 0x11CC0000, Q::SF, QWX, k3(K::RD, K::RN, K::UIMM8)),
     // Data processing, one source.
     r("rbit", 0x5AC00000, Q::SF, QWX, k2(K::RD, K::RN)),
     r("rev16", 0x5AC00400, Q::SF, QWX, k2(K::RD, K::RN)),
@@ -429,6 +449,10 @@ pub(package) const ROWS: [Row; 664] = [
     r("rev", 0xDAC00C00, Q::NONE, 0, k2(K::XD, K::XN)),
     r("clz", 0x5AC01000, Q::SF, QWX, k2(K::RD, K::RN)),
     r("cls", 0x5AC01400, Q::SF, QWX, k2(K::RD, K::RN)),
+    // FEAT_CSSC.
+    r("ctz", 0x5AC01800, Q::SF, QWX, k2(K::RD, K::RN)),
+    r("cnt", 0x5AC01C00, Q::SF, QWX, k2(K::RD, K::RN)),
+    r("abs", 0x5AC02000, Q::SF, QWX, k2(K::RD, K::RN)),
     // Data processing, three sources.
     r("mul", 0x1B007C00, Q::SF, QWX, k3(K::RD, K::RN, K::RM)),
     r("mneg", 0x1B00FC00, Q::SF, QWX, k3(K::RD, K::RN, K::RM)),
@@ -928,6 +952,12 @@ pub(package) const ROWS: [Row; 664] = [
     r("st1", 0x4C00A000, Q::NONE, 0, k2(K::L2B, K::M0)),
     r("st1", 0x4C006000, Q::NONE, 0, k2(K::L3B, K::M0)),
     r("st1", 0x4C002000, Q::NONE, 0, k2(K::L4B, K::M0)),
+    r("ld2", 0x4C408000, Q::NONE, 0, k2(K::L2B, K::M0)),
+    r("ld3", 0x4C404000, Q::NONE, 0, k2(K::L3B, K::M0)),
+    r("ld4", 0x4C400000, Q::NONE, 0, k2(K::L4B, K::M0)),
+    r("st2", 0x4C008000, Q::NONE, 0, k2(K::L2B, K::M0)),
+    r("st3", 0x4C004000, Q::NONE, 0, k2(K::L3B, K::M0)),
+    r("st4", 0x4C000000, Q::NONE, 0, k2(K::L4B, K::M0)),
     r("ld1", 0x0D400000, Q::NONE, 0, k2(K::LNB, K::M0)),
     r("ld1", 0x0D404000, Q::NONE, 0, k2(K::LNH, K::M0)),
     r("ld1", 0x0D408000, Q::NONE, 0, k2(K::LNS, K::M0)),
@@ -944,12 +974,28 @@ pub(package) const ROWS: [Row; 664] = [
     r("sha256h2", 0x5E005000, Q::NONE, 0, k3(K::QD, K::QN, K::V4SM)),
     r("sha256su0", 0x5E282800, Q::NONE, 0, k2(K::V4SD, K::V4SN)),
     r("sha256su1", 0x5E006000, Q::NONE, 0, k3(K::V4SD, K::V4SN, K::V4SM)),
+    r("sha1c", 0x5E000000, Q::NONE, 0, k3(K::QD, K::SN, K::V4SM)),
+    r("sha1p", 0x5E001000, Q::NONE, 0, k3(K::QD, K::SN, K::V4SM)),
+    r("sha1m", 0x5E002000, Q::NONE, 0, k3(K::QD, K::SN, K::V4SM)),
+    r("sha1h", 0x5E280800, Q::NONE, 0, k2(K::SD, K::SN)),
+    r("sha1su0", 0x5E003000, Q::NONE, 0, k3(K::V4SD, K::V4SN, K::V4SM)),
+    r("sha1su1", 0x5E281800, Q::NONE, 0, k2(K::V4SD, K::V4SN)),
+    r("sha512h", 0xCE608000, Q::NONE, 0, k3(K::QD, K::QN, K::V2DM)),
+    r("sha512h2", 0xCE608400, Q::NONE, 0, k3(K::QD, K::QN, K::V2DM)),
+    r("sha512su0", 0xCEC08000, Q::NONE, 0, k2(K::V2DD, K::V2DN)),
+    r("sha512su1", 0xCE608800, Q::NONE, 0, k3(K::V2DD, K::V2DN, K::V2DM)),
+    r("pmull", 0x0EE0E000, Q::NONE, 0, k3(K::V1QD, K::V1DN, K::V1DM)),
+    r("pmull2", 0x4EE0E000, Q::NONE, 0, k3(K::V1QD, K::V2DN, K::V2DM)),
+    r("pmull", 0x0E20E000, Q::NONE, 0, k3(K::V8HD, K::V8BN, K::V8BM)),
+    r("pmull2", 0x4E20E000, Q::NONE, 0, k3(K::V8HD, K::V16BN, K::V16BM)),
     r("eor3", 0xCE000000, Q::NONE, 0, k4(K::V16BD, K::V16BN, K::V16BM, K::V16BA)),
     r("bcax", 0xCE200000, Q::NONE, 0, k4(K::V16BD, K::V16BN, K::V16BM, K::V16BA)),
     r("rax1", 0xCE608C00, Q::NONE, 0, k3(K::V2DD, K::V2DN, K::V2DM)),
     r("xar", 0xCE800000, Q::NONE, 0, k4(K::V2DD, K::V2DN, K::V2DM, K::IMM6X)),
     r("sdot", 0x4E809400, Q::NONE, 0, k3(K::V4SD, K::V16BN, K::V16BM)),
     r("udot", 0x6E809400, Q::NONE, 0, k3(K::V4SD, K::V16BN, K::V16BM)),
+    r("sdot", 0x0E809400, Q::NONE, 0, k3(K::V2SD, K::V8BN, K::V8BM)),
+    r("udot", 0x2E809400, Q::NONE, 0, k3(K::V2SD, K::V8BN, K::V8BM)),
     r("smmla", 0x4E80A400, Q::NONE, 0, k3(K::V4SD, K::V16BN, K::V16BM)),
     r("ummla", 0x6E80A400, Q::NONE, 0, k3(K::V4SD, K::V16BN, K::V16BM)),
     r("usmmla", 0x4E80AC00, Q::NONE, 0, k3(K::V4SD, K::V16BN, K::V16BM)),
@@ -984,6 +1030,22 @@ pub(package) const ROWS: [Row; 664] = [
     r("st1b", 0xE4004000, Q::ZE, 1, k3(K::ZL1, K::PG, K::MSVR)),
     r("st1w", 0xE5404000, Q::ZE, 4, k3(K::ZL1, K::PG, K::MSVR)),
     r("st1d", 0xE5E04000, Q::ZE, 8, k3(K::ZL1, K::PG, K::MSVR)),
+    r("ld1h", 0xA4A0A000, Q::ZE, 2, k3(K::ZL1, K::PGZ, K::MSV)),
+    r("st1h", 0xE4A0E000, Q::ZE, 2, k3(K::ZL1, K::PG, K::MSV)),
+    // SVE comparisons into a predicate: of two vectors, of a vector and an immediate.
+    r("cmphs", 0x24000000, Q::Z, QALL, k4(K::PD, K::PGZ, K::ZN, K::ZM)),
+    r("cmphi", 0x24000010, Q::Z, QALL, k4(K::PD, K::PGZ, K::ZN, K::ZM)),
+    r("cmpge", 0x24008000, Q::Z, QALL, k4(K::PD, K::PGZ, K::ZN, K::ZM)),
+    r("cmpgt", 0x24008010, Q::Z, QALL, k4(K::PD, K::PGZ, K::ZN, K::ZM)),
+    r("cmpeq", 0x2400A000, Q::Z, QALL, k4(K::PD, K::PGZ, K::ZN, K::ZM)),
+    r("cmpne", 0x2400A010, Q::Z, QALL, k4(K::PD, K::PGZ, K::ZN, K::ZM)),
+    r("cmpeq", 0x25008000, Q::Z, QALL, k4(K::PD, K::PGZ, K::ZN, K::SIMM5)),
+    r("cmpne", 0x25008010, Q::Z, QALL, k4(K::PD, K::PGZ, K::ZN, K::SIMM5)),
+    r("sel", 0x0520C000, Q::Z, QALL, k4(K::ZD, K::PG, K::ZN, K::ZM)),
+    r("fcmge", 0x65004000, Q::Z, QZF, k4(K::PD, K::PGZ, K::ZN, K::ZM)),
+    r("fcmgt", 0x65004010, Q::Z, QZF, k4(K::PD, K::PGZ, K::ZN, K::ZM)),
+    r("fcmeq", 0x65006000, Q::Z, QZF, k4(K::PD, K::PGZ, K::ZN, K::ZM)),
+    r("fcmne", 0x65006010, Q::Z, QZF, k4(K::PD, K::PGZ, K::ZN, K::ZM)),
     // SME2 multi-vector loads and stores (a predicate-as-counter governs).
     r("ld1b", 0xA0400000, Q::ZE, 1, k3(K::ZL2, K::PNGZ, K::MSV)),
     r("ld1b", 0xA0408000, Q::ZE, 1, k3(K::ZL4, K::PNGZ, K::MSV)),
@@ -1015,6 +1077,11 @@ pub(package) const ROWS: [Row; 664] = [
     r("fmops", 0x80C00010, Q::ZE, 8, k5(K::ZAT, K::PGM, K::PMM, K::ZN, K::ZM)),
     r("smopa", 0xA0800000, Q::ZE, 4, k5(K::ZAT, K::PGM, K::PMM, K::ZBN, K::ZBM)),
     r("umopa", 0xA1A00000, Q::ZE, 4, k5(K::ZAT, K::PGM, K::PMM, K::ZBN, K::ZBM)),
+    // SME2: two 16-bit products per 32-bit element.
+    r("smopa", 0xA0800008, Q::ZE, 4, k5(K::ZAT, K::PGM, K::PMM, K::ZHN, K::ZHM)),
+    r("smops", 0xA0800018, Q::ZE, 4, k5(K::ZAT, K::PGM, K::PMM, K::ZHN, K::ZHM)),
+    r("umopa", 0xA1800008, Q::ZE, 4, k5(K::ZAT, K::PGM, K::PMM, K::ZHN, K::ZHM)),
+    r("umops", 0xA1800018, Q::ZE, 4, k5(K::ZAT, K::PGM, K::PMM, K::ZHN, K::ZHM)),
 ];
 
 // ---- Variants ----
@@ -1125,13 +1192,16 @@ pub(package) const fn fsize(qk: u8, q: u32) u32 {
 
 // ---- Operand kinds ----
 
-/// Whether `k` is a register kind (1 to 64, 161 to 192).
+/// Whether `k` is a register kind (1 to 64, 161 to 192, 205 to 208).
 pub(package) const fn is_reg(k: u8) bool {
-    return k >= 1 && k <= 64 || k >= 161 && k <= 192;
+    return k >= 1 && k <= 64 || k >= 161 && k <= 192 || k >= 205 && k <= 208;
 }
 
 /// The class of register kind `k` (`C_*`).
 pub(package) const fn reg_class(k: u8) u8 {
+    if k >= 205 {
+        return C::ZH;
+    }
     if k > 64 {
         return C::V8B + (k - 161) / 4;
     }
@@ -1221,6 +1291,9 @@ const fn kmask(k: u8, q: u32) u32 {
         K::PAT => 31u32 << 5,
         K::MULVL => 15u32 << 16,
         K::SIMM6 => 0x3Fu32 << 5,
+        K::SIMM5 => 31u32 << 16,
+        K::SIMM8 | K::UIMM8 => 0xFFu32 << 10,
+        K::V1QD => 31u32,
         K::MSV => 31u32 << 5 | 15u32 << 16,
         K::MSVR => 31u32 << 5 | 31u32 << 16,
         K::VLX => 1u32 << 13,
@@ -1626,6 +1699,22 @@ pub(package) const fn encode(r: Row, q0: u32, v: &Vals, out: &mut u32) bool {
                 w |= (a as u32 & 0x3F) << 5;
                 ok = within(a, -32, 31);
             },
+            K::SIMM5 => {
+                w |= (a as u32 & 31) << 16;
+                ok = within(a, -16, 15);
+            },
+            K::SIMM8 => {
+                w |= (a as u32 & 0xFF) << 10;
+                ok = within(a, -128, 127);
+            },
+            K::UIMM8 => {
+                w |= (a as u32 & 0xFF) << 10;
+                ok = within(a, 0, 255);
+            },
+            K::V1QD => {
+                w |= a as u32 & 31;
+                ok = within(a, 0, 31);
+            },
             K::MSV => {
                 let g = group(r);
                 w |= (a as u32 & 31) << 5 | ((b / g) as u32 & 15) << 16;
@@ -1921,6 +2010,18 @@ pub(package) const fn decode_row(r: Row, w: u32, qo: &mut u32, v: &mut Vals) boo
             },
             K::SIMM6 => {
                 v[at] = sext(w >> 5 & 0x3F, 6);
+            },
+            K::SIMM5 => {
+                v[at] = sext(w >> 16 & 31, 5);
+            },
+            K::SIMM8 => {
+                v[at] = sext(w >> 10 & 0xFF, 8);
+            },
+            K::UIMM8 => {
+                v[at] = w >> 10 & 0xFF;
+            },
+            K::V1QD => {
+                v[at] = w & 31;
             },
             K::MSV => {
                 v[at] = w >> 5 & 31;

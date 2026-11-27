@@ -574,16 +574,18 @@ inline void sc_f128_div(uint64_t sc_al, uint64_t sc_ah, uint64_t sc_bl, uint64_t
    products, quotients and square roots compute in float and round once: where the C compiler building
    the emitted code has `_Float16` on aarch64 (whose every processor converts it in hardware),
    sc_has_f16() folds to 1 and these convert an encoding to and from float, rounding to nearest even.
-   Elsewhere it folds to 0, std's own conversions stand, and the stubs are never reached. */
+   Elsewhere it folds to 0, std's own conversions stand, and the stubs are never reached. The type has
+   a name through `__extension__`: ISO C has `_Float16` from C23 only (GCC's -pedantic-errors). */
 #if defined(__aarch64__) && defined(__FLT16_MANT_DIG__)
+__extension__ typedef _Float16 sc_f16;
 inline int sc_has_f16(void) { return 1; }
 inline float sc_f16_to_f32(uint16_t sc_h) {
-  _Float16 sc_v;
+  sc_f16 sc_v;
   memcpy(&sc_v, &sc_h, sizeof sc_v);
   return (float)sc_v;
 }
 inline uint16_t sc_f32_to_f16(float sc_x) {
-  _Float16 sc_v = (_Float16)sc_x;
+  sc_f16 sc_v = (sc_f16)sc_x;
   uint16_t sc_h;
   memcpy(&sc_h, &sc_v, sizeof sc_h);
   return sc_h;

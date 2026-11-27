@@ -205,6 +205,18 @@ pub(package) struct Lower {
     b: Body,
     li: Vector<LInfo>,
     cc: LCaches,
+    // The classes of the types that name a parameter, per set of bindings (`env_of`: the bindings and the
+    // macro mode, by content, as an id into `tg_envs`): an instance body asks for each of its types many
+    // times, under a few sets (`ty`). `tg_gen` and `tg_mg` name the mangler state `tg_env` was found for.
+    tg: Vector<Map<u64, TyI>>,
+    tg_ids: Map<u64, Vector<u32>>,
+    tg_envs: Vector<Vector<mbe::MSub>>,
+    tg_mac: Vector<bool>,
+    tg_gen: u64,
+    tg_mg: usize,
+    tg_env: u32,
+    // The function symbols whose item's attributes a reference stated (`ref_attrs`).
+    attr_seen: Set<u32>,
     fenum: EnumL, // the shape the last `decl_fields` of an enum placed
     // Per local of the body, whether a `TM_DROP` drops it (`share_plan`): its drop runs after its
     // `ST_STORAGE_DEAD`, which drop elaboration puts before the drop.
@@ -295,6 +307,14 @@ extend Lower {
             b: Body::new(),
             li: Vector::<LInfo>::new(),
             cc: LCaches::new(),
+            tg: Vector::<Map<u64, TyI>>::new(),
+            tg_ids: Map::<u64, Vector<u32>>::new(),
+            tg_envs: Vector::<Vector<mbe::MSub>>::new(),
+            tg_mac: Vector::<bool>::new(),
+            tg_gen: 0,
+            tg_mg: 0,
+            tg_env: NONE,
+            attr_seen: Set::<u32>::new(),
             fenum: EnumL { ok: false },
             dropped: Vector::<bool>::new(),
             lms: Vector::<lay::MemberAt>::new(),
@@ -412,14 +432,77 @@ extend Lower {
             },
             None => {},
         }
+        // A type naming a parameter means what the bindings in place make it (`tg`).
+        let env = self.env_of(c);
+        switch self.tg[env as usize].get(&key) {
+            Some(v) => {
+                *out = *v;
+                return true;
+            },
+            None => {},
+        }
         if !self.ty_raw(c, m, t, out) {
             return false;
         }
-        // A type naming a parameter means what the bindings in place make it.
         if Lower::same_in_every_body(c, m, t) {
             self.cc.tcache.insert(key, *out);
+        } else if self.env_of(c) == env {
+            self.tg.index_mut(env as usize).insert(key, *out);
         }
         return true;
+    }
+
+    // The id of the bindings in place and the macro mode (`tg_envs`), by content: found again only when the
+    // mangler's bindings changed (`Mangler::subs_gen`).
+    fn env_of(self: &mut Self, c: &cbe::CEmit) u32 {
+        let mg = ((&c.mg) as *const mbe::Mangler) as usize;
+        let gen = c.mg.subs_gen();
+        if gen == self.tg_gen && mg == self.tg_mg && self.tg_env != NONE {
+            return self.tg_env;
+        }
+        let subs = &c.mg.subs;
+        let mac = c.mg.macro_on;
+        let mut h = 0xCBF29CE484222325u64 ^ mac as u64;
+        for i in 0..subs.len() {
+            let s = subs[i];
+            h = (h ^ s.pm as u64 << 48 ^ s.pnode as u64 << 16 ^ s.lim as u64).wrapping_mul(0x100000001B3);
+            h = (h ^ s.am as u64 << 32 ^ s.at as u64).wrapping_mul(0x100000001B3);
+        }
+        let mut id = NONE;
+        if let Some(ids) = self.tg_ids.get(&h) {
+            for j in 0..ids.len() {
+                let e = &self.tg_envs[ids[j] as usize];
+                let mut same = self.tg_mac[ids[j] as usize] == mac && e.len() == subs.len();
+                for i in 0..subs.len() {
+                    if !same {
+                        break;
+                    }
+                    let (x, y) = (e[i], subs[i]);
+                    same = x.pm == y.pm && x.pnode == y.pnode && x.am == y.am && x.at == y.at && x.lim == y.lim;
+                }
+                if same {
+                    id = ids[j];
+                    break;
+                }
+            }
+        }
+        if id == NONE {
+            id = self.tg_envs.len() as u32;
+            self.tg_envs.push(mbe::subs_copy(subs));
+            self.tg_mac.push(mac);
+            self.tg.push(Map::<u64, TyI>::new());
+            if let Some(ids) = self.tg_ids.get_mut(&h) {
+                ids.push(id);
+            } else {
+                let mut v = Vector::<u32>::new();
+                v.push(id);
+                self.tg_ids.insert(h, v);
+            }
+        }
+        self.tg_gen = gen;
+        self.tg_mg = mg;
+        self.tg_env = id;
+        return id;
     }
 
     // Whether type `(m, t)` means one thing in every body: a concrete type other than a closure with
@@ -762,6 +845,7 @@ extend Lower {
     // (`Package::decls`): a backend that types a function's address (wasm) reads it when the package
     // holds no body of the function, as when the per-TU cache replays the unit that defines it.
     fn ref_sig(self: &mut Self, c: &mut cbe::CEmit, k: u32, m: ModuleId, f: NodeId) bool {
+        self.ref_attrs(c, k, m, f);
         if self.pkg.syms[k as usize].sig != NONE {
             return true;
         }
@@ -3205,7 +3289,7 @@ extend Lower {
             let lvl = self.inst(O_ALOAD, T_I8, MO_RELAXED, la, VNONE, 0);
             for i in 0..copies.len() {
                 let t = self.block();
-                let at = self.icmp(C_UGE, lvl, self.iconst(T_I8, (copies.len() - i) as u64));
+                let at = self.icmp(C_UGE, lvl, self.iconst(T_I8, c.disp_k[i]));
                 self.split(at, t, true);
                 takes.push(t);
             }
@@ -6120,8 +6204,43 @@ extend Lower {
         if ti.cls == VC_MEM {
             args.push(dst);
         }
+        // A `bitcast` between vectors of one size is the plain `bitcast` the optimizer and the backends read
+        // through (a register stays one).
+        if rv.c == irc::SIMD_BITCAST && args.len() == 1 && is_vec(rt) && is_vec(self.vty(args[0])) && type_bytes(
+            self.vty(args[0]),
+            8,
+        ) == type_bytes(rt, 8) {
+            return self.inst(O_BITCAST, rt, 0, args[0], VNONE, VNONE);
+        }
+        // A shuffle of two vectors of its own type that interleaves their low or their high halves is that
+        // interleave (`vziplo`, `vziphi`), which each backend has as one instruction (x86-64's PUNPCKL and
+        // PUNPCKH, arm64's ZIP1 and ZIP2).
+        if rv.c == irc::SIMD_SHUFFLE && args.len() == 2 && is_vec(rt) && self.vty(args[0]) == rt && self.vty(args[1]) == rt {
+            let z = zip_of(&self.b.pool, lanes, type_bytes(rt, 8) / type_bytes(lane_type(rt), 8));
+            if z != 0 {
+                return self.inst(z, rt, 0, args[0], args[1], VNONE);
+            }
+        }
         return self.vop(code, rt, args[0..args.len()], lanes);
     }
+}
+
+// `O_VZIPLO` when the index list at `pool[at]` (its length, then the indices) over two vectors of `n` lanes
+// interleaves their low halves (lane 2k: k, lane 2k + 1: n + k), `O_VZIPHI` their high halves (n/2 + k
+// and n + n/2 + k), else 0.
+const fn zip_of(pool: &Vector<u32>, at: u32, n: u32) u8 {
+    if pool[at as usize] != n || n < 2 || n % 2 != 0 {
+        return 0;
+    }
+    let mut lo = true;
+    let mut hi = true;
+    for k in 0..n / 2 {
+        let x = pool[(at + 1 + 2 * k) as usize];
+        let y = pool[(at + 2 + 2 * k) as usize];
+        lo = lo && x == k && y == n + k;
+        hi = hi && x == n / 2 + k && y == n + n / 2 + k;
+    }
+    return ast::pick(lo, O_VZIPLO, ast::pick(hi, O_VZIPHI, 0u8));
 }
 
 // The operand count of check intrinsic `k`, and of the one-operand hints.
@@ -8041,6 +8160,10 @@ extend Lower {
             if ext && c.mg.takes_secret(pcallee.module, pcallee.node) {
                 self.mark_sec(name.as_str());
             }
+            if fd.kind == NodeKind::NODE_FUNCTION && !ext {
+                let s = self.pkg.symbol(name.as_str(), SK_FUNC);
+                self.ref_attrs(c, s, pcallee.module, pcallee.node);
+            }
         }
         // A generic callee's parameter types read the bindings of its instance (`arg_mode`); the
         // arguments read the caller's.
@@ -9081,6 +9204,17 @@ extend Lower {
         if s != NONE {
             self.item_attrs(c, s, m, n);
         }
+    }
+
+    // A reference to function `(m, n)`, symbol `s`, states the item's attributes (`item_attrs`) once: a build
+    // that replays the function's unit has no definition to take them from, and `Sym.used` decides the
+    // convention a call or a function's address takes on Windows (`win64`).
+    fn ref_attrs(self: &mut Self, c: &mut cbe::CEmit, s: u32, m: ModuleId, n: NodeId) {
+        if self.attr_seen.contains(&s) {
+            return;
+        }
+        self.attr_seen.insert(s);
+        self.item_attrs(c, s, m, n);
     }
 
     // Item `(m, n)`'s `@used` and `@unsafe(link_section)` onto symbol `s`; an `@export` function is kept as

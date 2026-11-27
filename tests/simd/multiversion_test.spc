@@ -57,6 +57,21 @@ fn uses_beyond_the_callers_features_need_unsafe() {
     // A build whose features hold the function's needs no `unsafe`.
     let b = x86(&p, "fn main() i32 {\n    return wide(0) - 1;\n}\n", "--target-cpu=x86-64-v3");
     assert(b.ok(), "the build's features");
+    // macOS arm64's baseline holds SHA-256, Linux arm64's does not: code both build keeps its `unsafe`,
+    // unless the caller's own features give it.
+    let sha = "import std::cpu;\n@arch(aarch64)\n@target_feature([cpu::Feature::Sha2])\nfn h(a: i32) i32 {\n    return a + 1;\n}\n";
+    p.mkfile("main.spc", format("{}fn main() i32 {{\n    return unsafe h(0) - 1;\n}}\n", sha).as_str());
+    let mac = p.run_raw(format("lint --arch=aarch64 --target=macos \"{}/main.spc\"", p.dir()).as_str());
+    assert(!mac.out_has("unnecessary 'unsafe'"), "another platform of the instruction set needs it");
+    p.mkfile(
+        "main.spc",
+        format(
+            "{}@arch(aarch64)\n@target_feature([cpu::Feature::Sha2])\nfn g(a: i32) i32 {{\n    return unsafe h(a);\n}}\nfn main() i32 {{\n    return 0;\n}}\n",
+            sha,
+        ).as_str(),
+    );
+    let own = p.run_raw(format("lint --arch=aarch64 --target=macos \"{}/main.spc\"", p.dir()).as_str());
+    assert(own.out_has("unnecessary 'unsafe'"), "the caller's features give it");
 }
 
 // Such a function is no value of a closure bound: the bound's caller runs it without the check. A
@@ -226,6 +241,27 @@ fn vector_functions_choose_their_copy_at_run_time() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"main.spc\"\nsimd-dispatch = \"x86-64-v9\"\n");
     let man = cli::superc_in(root, "build");
     assert(!man.ok() && man.out_has("simd dispatch: unknown target CPU 'x86-64-v9'"), "a bad manifest level");
+}
+
+// A function without vector values that calls a small vector function in a loop has run-time copies too:
+// inlined, the callee's level check would run at each step, where the caller's runs once at its entry.
+// Called outside a loop, the callee keeps its own check and the caller has no copy.
+@test
+fn loops_over_vector_helpers_choose_their_copy_at_run_time() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "import std::simd;\n\nfn step(c: []mut f32, a: []f32, i: usize) {\n    simd::store(c, i, simd::load::<f32, 8>(a, i).fma(simd::load::<f32, 8>(a, i), simd::load::<f32, 8>(c, i)));\n}\n\n@noinline\nfn outer(c: []mut f32, a: []f32) {\n    let mut i: usize = 0;\n    while i + 8 <= a.len() {\n        step(c, a, i);\n        i += 8;\n    }\n}\n\n@noinline\nfn once(c: []mut f32, a: []f32) {\n    step(c, a, 0);\n}\n\nfn main(args: Vector<str>) i32 {\n    let a: [f32; 8] = [1.0; 8];\n    let mut c: [f32; 8] = [0.0; 8];\n    outer(c, a);\n    once(c, a);\n    return args.len() as i32 - 1;\n}\n",
+    );
+    let root = p.dir();
+    let _ = p.run_raw(
+        format("build \"{}/main.spc\" --emit-c --profile=release --arch=x86_64 --target=linux", root).as_str(),
+    );
+    let raw = format("{}/build/release/raw", root);
+    let mut t = cli::read_text(format("{}/main.c", raw).as_str());
+    t.push_str(cli::read_text(format("{}/main__inst.c", raw).as_str()).as_str());
+    assert(t.contains("main__outer__fs"), "the loop's caller has a copy");
+    assert(!t.contains("main__once__fs"), "a single call keeps the callee's check");
 }
 
 // A native x86_64 build makes the same choice: the function with vector code reads the level the
@@ -526,23 +562,40 @@ const fn pick<T>(c: bool, a: T, b: T) T {
 }
 
 // The x86 query's decision: AVX needs OSXSAVE and the XCR0 SSE and AVX state bits; AVX-512 the opmask
-// and ZMM state bits too, or the OS's own report (macOS); AVX10 its version.
+// and ZMM state bits too, or the OS's own report (macOS); AVX10 its version; SHA512 (CPUID.(7,1):EAX bit
+// 0) the AVX state; AMX-TILE and AMX-INT8 (CPUID.(7,0):EDX bits 24 and 25) the tile state (XCR0 bits 17
+// and 18).
 @test
 fn x86_decision_needs_the_register_state() {
     let bit = fn(w: u64, f: cpu::Feature) bool {
         return (w >> f as u64 & 1) != 0;
     };
-    let mut r: [u32; 7] = [0; 7];
+    let mut r: [u32; 8] = [0; 8];
     r[0] = 1 << 28 | 1 << 27 | 1 << 20; // avx, osxsave, sse4.2
+    r[7] = 1; // sha512
+    r[3] = 1 << 24 | 1 << 25; // amx-tile, amx-int8
     r[1] = 1 << 5 | 1 << 16; // avx2, avx512f
     let w0 = unsafe sc_cpu::sc_cpu_x86_decide(&r[0], 0, 0);
-    assert(bit(w0, cpu::Feature::Sse2) && bit(w0, cpu::Feature::Sse42) && !bit(w0, cpu::Feature::Avx), "no state");
+    assert(
+        bit(w0, cpu::Feature::Sse2) && bit(w0, cpu::Feature::Sse42) && !bit(w0, cpu::Feature::Avx) && !bit(
+            w0,
+            cpu::Feature::Sha512ni,
+        ),
+        "no state",
+    );
     let w1 = unsafe sc_cpu::sc_cpu_x86_decide(&r[0], 6, 0);
     assert(
-        bit(w1, cpu::Feature::Avx) && bit(w1, cpu::Feature::Avx2) && !bit(w1, cpu::Feature::Avx512f),
+        bit(w1, cpu::Feature::Avx) && bit(w1, cpu::Feature::Avx2) && bit(w1, cpu::Feature::Sha512ni) && !bit(
+            w1,
+            cpu::Feature::Avx512f,
+        ),
         "the AVX state",
     );
     assert(bit(unsafe sc_cpu::sc_cpu_x86_decide(&r[0], 0xE6, 0), cpu::Feature::Avx512f), "the ZMM state");
+    assert(!bit(w1, cpu::Feature::AmxTile) && !bit(w1, cpu::Feature::AmxInt8), "no tile state");
+    let wt = unsafe sc_cpu::sc_cpu_x86_decide(&r[0], 0x60006, 0);
+    assert(bit(wt, cpu::Feature::AmxTile) && bit(wt, cpu::Feature::AmxInt8), "the tile state");
+    assert(!bit(unsafe sc_cpu::sc_cpu_x86_decide(&r[0], 0x20006, 0), cpu::Feature::AmxInt8), "half the tile state");
     assert(bit(unsafe sc_cpu::sc_cpu_x86_decide(&r[0], 6, 1), cpu::Feature::Avx512f), "the OS's report");
     r[0] = 1 << 28 | 1 << 20;
     assert(!bit(unsafe sc_cpu::sc_cpu_x86_decide(&r[0], 0xE6, 1), cpu::Feature::Avx), "no OSXSAVE");

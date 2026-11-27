@@ -5,7 +5,8 @@
 // runtime as mingw-w64's start code does, runs the `.CRT$XC*` initializers and calls `main`; a DLL's
 // entry runs the initializers on attach and its `atexit` handlers on detach, from a table of its own,
 // and its export directory names every global its objects define. Thread-locals use the image's TLS
-// directory. The image carries base relocations (it loads at any address), the exception
+// directory, which `_tls_used` names, its callbacks the `.CRT$XL*` pointers (as mingw-w64's `tlssup`
+// lists them: winpthreads' thread-exit callback). The image carries base relocations (it loads at any address), the exception
 // table, and the debug sections unless stripped.
 //
 // mingw-w64's import libraries also carry a few C functions the C runtime DLLs do not export: the ones
@@ -36,6 +37,7 @@ pub(package) struct Opts {
     pub(package) strip: bool,
     pub(package) stack: u64,
     pub(package) gc: bool, // drop the COMDAT sections nothing reaches (`--gc-sections`, `collect`)
+    pub(package) fold: bool, // one copy of identical functions whose address nothing takes (`--icf=safe`, with `gc`)
     /// A shared library's exports: None, every default-visibility global; else the globals named.
     pub(package) exports: Option<Set<String>>,
     pub(package) mem: *mut lu::Mem, // the objects held in memory (`lu::take_held`)
@@ -112,7 +114,8 @@ struct IFile {
 }
 
 // An input section: its name, the output section it joins, flags, alignment, size, bytes (in the blob;
-// none for zero-filled data), relocations, and where it lands in its output section.
+// none for zero-filled data), relocations, and where it lands in its output section. A section identical
+// code folding removed (`fold_code`) lands where section `fold` does.
 struct ISec {
     pub(package) file: u32,
     pub(package) name: u32,
@@ -126,6 +129,7 @@ struct ISec {
     pub(package) at: u64,
     pub(package) assoc: u32, // an associative COMDAT section's section, else NONE
     pub(package) sel: u8, // a COMDAT section's selection, else 0
+    pub(package) fold: u32,
 }
 
 // An input symbol (an auxiliary record keeps its slot, so symbol table indices stay direct).
@@ -210,6 +214,10 @@ struct L {
     pub(package) tls_index_at: u64, // in `.data`
     pub(package) xc_lo: u64, // the `.CRT$XC*` initializers' range in `.rdata`
     pub(package) xc_hi: u64,
+    pub(package) xl_lo: u64, // the `.CRT$XL*` TLS callbacks' range in `.rdata`, a null pointer after it
+    pub(package) xl_hi: u64,
+    pub(package) tls_used: bool, // an object names `_tls_used`
+    pub(package) tlsdir: bool, // the image has a TLS directory
     pub(package) entry_pdata_at: u64, // in `.pdata`
     pub(package) shared: bool, // a DLL
     pub(package) base: u64, // the preferred image address
@@ -251,6 +259,10 @@ pub(package) fn link(o: &Opts, err: &mut String) bool {
         tls_index_at: 0,
         xc_lo: 0,
         xc_hi: 0,
+        xl_lo: 0,
+        xl_hi: 0,
+        tls_used: false,
+        tlsdir: false,
         entry_pdata_at: 0,
         shared: o.shared,
         base: ast::pick(o.shared, DLL_BASE, EXE_BASE),
@@ -300,7 +312,7 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
     }
     let b = blob.as_slice();
     if o.gc {
-        collect(l, b, main);
+        collect(l, b, main, o.fold, o.jobs);
     }
     layout(l, o);
     let mut img = Vector::<u8>::new();
@@ -407,6 +419,7 @@ fn parse_object(l: &mut L, path: str, at: usize, blob: &Vector<u8>) bool {
                 at: 0,
                 assoc: NONE,
                 sel: 0,
+                fold: NONE,
             },
         );
     }
@@ -630,11 +643,16 @@ fn bind_weak(l: &mut L) {
 // are every other loaded section, `main` and a DLL's exports. A section kept keeps its associative
 // sections (its function table entries and unwind information). Debug sections are no roots: a relocation
 // of theirs into a dropped section stays unapplied (`apply`). Each round marks a new section or ends the
-// loop.
-fn collect(l: &mut L, b: []u8, main: u32) {
+// loop. With `fold`, the identical functions whose address nothing takes fold (`fold_code`): the roots and
+// the relocations but a call's and a section's own unwind information's mark the taken ones.
+fn collect(l: &mut L, b: []u8, main: u32, fold: bool, jobs: u32) {
     let mut live = Vector::<bool>::new();
     live.resize_default(l.secs.len());
     let mut work = Vector::<u32>::new();
+    let mut taken = Vector::<bool>::new();
+    if fold {
+        taken.resize_default(l.secs.len());
+    }
     for s in 0..l.secs.len() {
         let fl = l.secs[s].flags;
         if (fl & (SCN_LNK_COMDAT | SCN_LNK_INFO | SCN_LNK_REMOVE | SCN_DISCARDABLE)) == 0 {
@@ -644,10 +662,12 @@ fn collect(l: &mut L, b: []u8, main: u32) {
     }
     if !l.shared {
         reach_global(l, main, &mut live, &mut work);
+        take(def_sec(l, l.gs[main as usize].sym, main), &mut taken);
     }
     for g in 0..l.gs.len() {
         if l.shared && l.gs[g].alias == NONE {
             reach_global(l, g as u32, &mut live, &mut work);
+            take(def_sec(l, l.gs[g].sym, g as u32), &mut taken);
         }
     }
     loop {
@@ -655,7 +675,19 @@ fn collect(l: &mut L, b: []u8, main: u32) {
             let sc = l.secs[s as usize];
             let f = l.files[sc.file as usize];
             for i in 0..sc.nreloc as usize {
-                reach_sym(l, f.sym0 + lu::r32(b, sc.reloff + 10 * i + 4), &mut live, &mut work);
+                let k = f.sym0 + lu::r32(b, sc.reloff + 10 * i + 4);
+                reach_sym(l, k, &mut live, &mut work);
+                if fold {
+                    let t = def_sec(l, k, gof(l, k));
+                    if t != NONE && sc.assoc != t && !call_at(
+                        b,
+                        sc,
+                        lu::r32(b, sc.reloff + 10 * i) as usize,
+                        lu::r16(b, sc.reloff + 10 * i + 8),
+                    ) {
+                        taken[t as usize] = true;
+                    }
+                }
             }
         }
         for s in 0..l.secs.len() {
@@ -671,6 +703,177 @@ fn collect(l: &mut L, b: []u8, main: u32) {
     }
     for s in 0..l.secs.len() {
         if (l.secs[s].flags & SCN_LNK_COMDAT) != 0 && !live[s] {
+            l.secs.index_mut(s).flags |= SCN_LNK_REMOVE;
+        }
+    }
+    if fold {
+        fold_code(l, b, &taken, jobs);
+    }
+}
+
+// The section that defines the target of symbol `k` (global `g`, NONE: a local), NONE when none does.
+const fn def_sec(l: &L, k: u32, g: u32) u32 {
+    let mut kk = k;
+    if g != NONE {
+        let t = res(l, g);
+        if l.gs[t as usize].kind != G_DEF {
+            return NONE;
+        }
+        kk = l.gs[t as usize].sym;
+    }
+    let y = l.syms[kk as usize];
+    if y.sec <= 0 {
+        return NONE;
+    }
+    return l.files[y.file as usize].sec0 + (y.sec - 1) as u32;
+}
+
+// Mark section `s` taken, when `taken` is in use.
+const fn take(s: u32, taken: &mut Vector<bool>) {
+    if s != NONE && taken.len() != 0 {
+        taken[s as usize] = true;
+    }
+}
+
+// Whether the relocation of type `ty` at offset `at` of section `sc` is a call's or a jump's target, which
+// takes no address: x86-64 code's `call` (E8), `jmp` (E9) or conditional jump (0F 8x) before a REL32 field.
+const fn call_at(b: []u8, sc: ISec, at: usize, ty: u32) bool {
+    if ty != REL_REL32 || (sc.flags & SCN_CODE) == 0 || at == 0 {
+        return false;
+    }
+    let op = b[sc.off + at - 1];
+    return op == 0xE8 || op == 0xE9 || at >= 2 && b[sc.off + at - 2] == 0x0F && (op & 0xF0) == 0x80;
+}
+
+// ---- identical code folding -----------------------------------------------------------------------------
+
+// Fold each live COMDAT code section into the first identical one (`lu::fold`), as lld-link's `/OPT:ICF`
+// does with the sections whose address nothing takes (`taken`), so no two functions a program can tell
+// apart by address share one. A section's key holds its output section, flags and alignment; one whose
+// unwind information names a handler (relocations in its `.xdata`) stays. A folded section and its
+// associative sections but the debug ones go: its copy's function table entry describes the same code.
+fn fold_code(l: &mut L, b: []u8, taken: &Vector<bool>, jobs: u32) {
+    let ns = l.secs.len();
+    let mut cand = Vector::<bool>::new();
+    cand.resize_default(ns);
+    let mut nc: u32 = 0;
+    for s in 0..ns {
+        let sc = l.secs[s];
+        let comdat = (sc.flags & (SCN_LNK_COMDAT | SCN_LNK_REMOVE | SCN_WRITE)) == SCN_LNK_COMDAT;
+        if !taken[s] && comdat && sc.assoc == NONE && (sc.flags & SCN_CODE) != 0 && sc.size != 0 && sc.off != 0 {
+            cand[s] = true;
+            nc += 1;
+        }
+    }
+    if nc < 2 {
+        return;
+    }
+    for s in 0..ns {
+        let sc = l.secs[s];
+        if sc.assoc != NONE && sc.nreloc != 0 && l.sn.spell(sc.name).starts_with(".xdata") {
+            cand[sc.assoc as usize] = false;
+        }
+    }
+    // The candidates' keys and bytes hashed; only those that share a hash with another stay candidates.
+    let mut all = Vector::<lu::FoldPart>::new();
+    for s in 0..ns {
+        if !cand[s] {
+            continue;
+        }
+        let sc = l.secs[s];
+        let mut key = (sc.flags as u64 ^ sc.align << 40).wrapping_mul(0x9E3779B97F4A7C15);
+        for c in out_name(l.sn.spell(sc.name), sc.flags).bytes() {
+            key = (key ^ c as u64).wrapping_mul(0x100000001B3);
+        }
+        all.push(lu::FoldPart { at: sc.off, len: sc.size as usize, key: key, hash: 0, r0: s as u32, rn: 0 });
+    }
+    lu::fold_hashes(&mut all, b, jobs);
+    let mut hs = Vector::<u128>::with_capacity(all.len());
+    for i in 0..all.len() {
+        hs.push(all[i].hash as u128 << 32 | i as u64);
+    }
+    hs.sort();
+    let mut shared = Vector::<bool>::new();
+    shared.resize_default(all.len());
+    for k in 0..hs.len() {
+        if k > 0 && hs[k] >> 32 == hs[k - 1] >> 32 || k + 1 < hs.len() && hs[k] >> 32 == hs[k + 1] >> 32 {
+            shared[(hs[k] & 0xFFFFFFFF) as usize] = true;
+        }
+    }
+    // Per input section, its index among the candidates plus 1 (0: none).
+    let mut ci = Vector::<u32>::new();
+    ci.resize_default(ns);
+    let mut ps = Vector::<lu::FoldPart>::new();
+    for i in 0..all.len() {
+        if shared[i] {
+            ci[all[i].r0 as usize] = ps.len() as u32 + 1;
+            ps.push(all[i]);
+        }
+    }
+    // The candidates' relocations (their addends in the bytes), their targets as candidates, globals or
+    // places.
+    let mut rs = Vector::<lu::FoldRel>::new();
+    for i in 0..ps.len() {
+        let sc = l.secs[ps[i].r0 as usize];
+        let f = l.files[sc.file as usize];
+        let r0 = rs.len() as u32;
+        for j in 0..sc.nreloc as usize {
+            let e = sc.reloff + 10 * j;
+            let k = f.sym0 + lu::r32(b, e + 4);
+            let g = gof(l, k);
+            let mut fr = lu::FoldRel {
+                off: lu::r32(b, e),
+                kind: lu::r16(b, e + 8),
+                part: lu::FOLD_NONE,
+                tgt: 0,
+                val: 0,
+            };
+            let d = def_sec(l, k, g);
+            if d != NONE && ci[d as usize] != 0 {
+                fr.part = ci[d as usize] - 1;
+                let dk = if g != NONE {
+                    l.gs[res(l, g) as usize].sym
+                } else {
+                    k
+                };
+                fr.val = l.syms[dk as usize].value;
+            } else if g != NONE {
+                fr.tgt = lu::FOLD_GLOBAL | res(l, g) as u64;
+                fr.val = l.gs[g as usize].iat as u64;
+            } else if d != NONE {
+                fr.tgt = lu::FOLD_SECTION | d as u64;
+                fr.val = l.syms[k as usize].value;
+            } else {
+                let y = l.syms[k as usize];
+                fr.tgt = lu::FOLD_ABS;
+                fr.val = (y.sec as u16) as u64 << 32 | y.value as u64;
+            }
+            rs.push(fr);
+        }
+        let pi = ps.index_mut(i);
+        pi.r0 = r0;
+        pi.rn = rs.len() as u32 - r0;
+    }
+    let into = lu::fold(&ps, &rs, b);
+    let mut idx = Vector::<u32>::with_capacity(ps.len());
+    for s in 0..ns {
+        if ci[s] != 0 {
+            idx.push(s as u32);
+        }
+    }
+    let mut gone = Vector::<bool>::new();
+    gone.resize_default(ns);
+    for i in 0..into.len() {
+        if into[i] != lu::FOLD_NONE {
+            let ms = l.secs.index_mut(idx[i] as usize);
+            ms.flags |= SCN_LNK_REMOVE;
+            ms.fold = idx[into[i] as usize];
+            gone[idx[i] as usize] = true;
+        }
+    }
+    for s in 0..ns {
+        let sc = l.secs[s];
+        if sc.assoc != NONE && gone[sc.assoc as usize] && (sc.flags & SCN_DISCARDABLE) == 0 {
             l.secs.index_mut(s).flags |= SCN_LNK_REMOVE;
         }
     }
@@ -1011,8 +1214,9 @@ fn finish_symbols(l: &mut L, main: u32) bool {
         let gy = l.gs[g];
         if gy.kind == G_UNDEF && gy.alias == NONE {
             let s = l.names.spell(gy.name);
-            if s == "_tls_index" || s == "__ImageBase" || s == "__sc_dll_atexit" && l.shared {
+            if s == "_tls_index" || s == "_tls_used" || s == "__ImageBase" || s == "__sc_dll_atexit" && l.shared {
                 l.gs.index_mut(g).kind = G_SYNTH;
+                l.tls_used = l.tls_used || s == "_tls_used";
             }
         }
     }
@@ -1152,6 +1356,7 @@ fn layout(l: &mut L, o: &Opts) {
     }
     keyed.sort();
     let mut xc_first = true;
+    let mut xl_first = true;
     // The last input's output section: the next input of the same output name joins it.
     let mut prev_o = NONE;
     let mut prev = "";
@@ -1160,6 +1365,10 @@ fn layout(l: &mut L, o: &Opts) {
         let sc = l.secs[s as usize];
         let n = keyed[i].0.as_str();
         let on = out_name(n, sc.flags);
+        // The callbacks' null terminator after the last of them.
+        if !xl_first && l.xl_hi == l.osecs[l.o_rdata as usize].size && !n.starts_with(".CRT$XL") {
+            let _ = grow(l, l.o_rdata, 8, 8);
+        }
         if prev_o == NONE || on != prev {
             let mut fl = out_flags(on);
             if on != ".text" && on != ".rdata" && on != ".data" && on != ".bss" && on != ".tls" && on != ".pdata" && !on.starts_with(
@@ -1182,6 +1391,16 @@ fn layout(l: &mut L, o: &Opts) {
             }
             l.xc_hi = at + sc.size;
         }
+        if n.starts_with(".CRT$XL") {
+            if xl_first {
+                l.xl_lo = at;
+                xl_first = false;
+            }
+            l.xl_hi = at + sc.size;
+        }
+    }
+    if !xl_first && l.xl_hi == l.osecs[l.o_rdata as usize].size {
+        let _ = grow(l, l.o_rdata, 8, 8);
     }
     // Tentative definitions in `.bss`.
     for g in 0..l.gs.len() {
@@ -1208,7 +1427,8 @@ fn layout(l: &mut L, o: &Opts) {
     l.thunks_at = grow(l, l.o_text, 8 * nimp, 8);
     l.xdata_at = grow(l, l.o_rdata, 12, 4);
     l.entry_pdata_at = grow(l, l.o_pdata, 12, 4);
-    if l.osecs[l.o_tls as usize].size != 0 {
+    l.tlsdir = l.osecs[l.o_tls as usize].size != 0 || l.xl_hi != l.xl_lo || l.tls_used;
+    if l.tlsdir {
         l.tlsdir_at = grow(l, l.o_rdata, 48, 8);
     }
     l.tls_index_at = grow(l, l.o_data, 4, 4);
@@ -1285,6 +1505,16 @@ fn layout(l: &mut L, o: &Opts) {
             os.off = off;
             os.raw = lu::align_up(os.size, FILE_ALIGN);
             off += os.raw;
+        }
+    }
+    // A folded section lands where its copy does (`fold_code`).
+    for s in 0..l.secs.len() {
+        let d = l.secs[s].fold;
+        if d != NONE {
+            let c = l.secs[d as usize];
+            let ms = l.secs.index_mut(s);
+            ms.out = c.out;
+            ms.at = c.at;
         }
     }
 }
@@ -1395,6 +1625,9 @@ fn g_rva(l: &L, g0: u32) u64 {
     }
     if l.names.spell(gy.name) == "_tls_index" {
         return l.osecs[l.o_data as usize].rva + l.tls_index_at;
+    }
+    if l.names.spell(gy.name) == "_tls_used" {
+        return l.osecs[l.o_rdata as usize].rva + l.tlsdir_at;
     }
     if l.names.spell(gy.name) == "__sc_dll_atexit" {
         return l.osecs[l.o_text as usize].rva + l.entry_at + DLL_ATEXIT;
@@ -1527,7 +1760,7 @@ fn rel_chunk(ctx: *mut void, c: usize) {
 // order. False, with the reason in `err`, when a relocation cannot be applied.
 fn relocate(l: &L, b: []u8, img: lu::Img, s: usize, rels: &mut Vector<u32>, err: &mut String) bool {
     let sc = l.secs[s];
-    if sc.out == NONE {
+    if sc.out == NONE || sc.fold != NONE {
         return true;
     }
     if sc.off != 0 && (l.osecs[sc.out as usize].flags & SCN_UDATA) == 0 {
@@ -1961,18 +2194,24 @@ fn write_tables(l: &mut L, img: &mut Vector<u8>) {
         img[t + 6] = 0xCC;
         img[t + 7] = 0xCC;
     }
-    // The TLS directory: the template's start and end, the index's address, the empty callback list
-    // (the directory's last 8 bytes), no zero fill, the template's alignment.
-    if l.o_tls != NONE {
-        let tl = l.osecs[l.o_tls as usize];
+    // The TLS directory: the template's start and end (empty without one), the index's address, the
+    // callbacks (the `.CRT$XL*` pointers and the null after them, else the empty list in the directory's
+    // last 8 bytes), no zero fill, the template's alignment.
+    if l.tlsdir {
         let d = (rd.off + l.tlsdir_at) as usize;
         let dr = rd.rva + l.tlsdir_at;
-        lu::p64(img, d, l.base + tl.rva);
-        lu::p64(img, d + 8, l.base + tl.rva + tl.size);
+        let (t0, t1, ta) = if l.o_tls != NONE {
+            let tl = l.osecs[l.o_tls as usize];
+            (tl.rva, tl.rva + tl.size, tl.align)
+        } else {
+            (dr, dr, 1u64)
+        };
+        lu::p64(img, d, l.base + t0);
+        lu::p64(img, d + 8, l.base + t1);
         lu::p64(img, d + 16, l.base + l.osecs[l.o_data as usize].rva + l.tls_index_at);
-        lu::p64(img, d + 24, l.base + dr + 40);
+        lu::p64(img, d + 24, l.base + ast::pick(l.xl_hi != l.xl_lo, rd.rva + l.xl_lo, dr + 40));
         lu::p32(img, d + 32, 0);
-        lu::p32(img, d + 36, tl.align.trailing_zeros() as u32 + 1 << 20);
+        lu::p32(img, d + 36, ta.trailing_zeros() as u32 + 1 << 20);
         for q in 0..4u64 {
             l.relocs.push((dr + 8 * q) as u32);
         }
@@ -2222,7 +2461,7 @@ fn finish(l: &mut L, o: &Opts, img: &mut Vector<u8>) {
             (pd.rva, pd.size)
         } else if d == 5 && nrel_sec != 0 {
             (rel_rva, rb.len() as u64)
-        } else if d == 9 && l.o_tls != NONE {
+        } else if d == 9 && l.tlsdir {
             (l.osecs[l.o_rdata as usize].rva + l.tlsdir_at, 40u64)
         } else if d == 12 {
             (iat, 8 * (l.imports.len() as u64 + nlib))

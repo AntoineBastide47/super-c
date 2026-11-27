@@ -197,16 +197,24 @@ fn layout_eq_and_format() {
     assert(s.as_str() == "Layout { size: 4, align: 4 }", "derived format");
 }
 
+// The least multiple of `a` not below `x`, and the greatest not above it, for every `x` and power of two
+// `a` where they fit; the build proves them.
+lemma align_up_rounds_up(x: usize, a: usize)
+    requires a.is_power_of_two() && x <= ~(0 as usize) - (a - 1)
+    ensures layout::align_up(x, a) >= x
+    ensures (layout::align_up(x, a) & a - 1) == 0
+    ensures layout::align_up(x, a) - x < a
+{}
+
+lemma align_down_rounds_down(x: usize, a: usize)
+    requires a.is_power_of_two()
+    ensures layout::align_down(x, a) <= x
+    ensures (layout::align_down(x, a) & a - 1) == 0
+    ensures x - layout::align_down(x, a) < a
+{}
+
 @test
 fn align_helpers() {
-    assert_eq(layout::align_up(0, 8), 0);
-    assert_eq(layout::align_up(1, 8), 8);
-    assert_eq(layout::align_up(8, 8), 8);
-    assert_eq(layout::align_up(9, 8), 16);
-    assert_eq(layout::align_up(~(0 as usize) - 7, 8), ~(0 as usize) - 7);
-    assert_eq(layout::align_down(15, 8), 8);
-    assert_eq(layout::align_down(16, 8), 16);
-    assert_eq(layout::align_down(7, 1), 7);
     let words: [u64; 2] = [0, 0];
     let p = (&words[0]) as *const u64;
     assert(layout::is_aligned(p, 8), "a u64 is 8-aligned");

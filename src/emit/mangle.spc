@@ -908,6 +908,12 @@ extend Mangler {
         return unsafe &*self.pkg;
     }
 
+    /// The generation of the bindings in place: it changes whenever they do (`subs`), so a result of
+    /// the bindings stays valid while it is the same.
+    pub(package) const fn subs_gen(self: &Self) u64 {
+        return self.subs_gen;
+    }
+
     /// Bind a generic param for per-instance spelling; pop with `pop_subs` (LIFO frames).
     pub(package) fn push_sub(self: &mut Self, pm: ModuleId, pnode: NodeId, am: ModuleId, at: TypeId) {
         let lim = self.subs.len() as u32;

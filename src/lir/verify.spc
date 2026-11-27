@@ -246,7 +246,11 @@ extend Verifier {
         if t.a != VNONE != n > 0 || t.b != VNONE != n > 1 || t.c != VNONE != n > 2 {
             return self.fail_at(name, b, i, "a system operation takes its operands and no other");
         }
-        let res = ast::pick(s == SYS_CYCLES || s == SYS_GSLOAD || s == SYS_XGETBV || s == SYS_SVL, T_I64, T_NONE);
+        let res = if s == SYS_SVE {
+            T_I8
+        } else {
+            ast::pick(s == SYS_CYCLES || s == SYS_GSLOAD || s == SYS_XGETBV || s == SYS_SVL, T_I64, T_NONE)
+        };
         let ok = if s == SYS_FPSAVE {
             ta == T_PTR
         } else if s == SYS_GSLOAD {
@@ -367,6 +371,19 @@ extend Verifier {
                     8,
                 ) == type_bytes(t.ty, 8) && lanes(tb) > lanes(t.ty),
                 "an integer vector of the result's type and one of its bytes in narrower lanes",
+            );
+        }
+        if op == O_VDOT {
+            let tc = b.type_of(t.c);
+            return self.need(
+                name,
+                b,
+                i,
+                is_vec(t.ty) && is_int(lane_type(t.ty)) && ta == t.ty && is_vec(tb) && is_int(lane_type(tb)) && tc == tb && type_bytes(
+                    tb,
+                    8,
+                ) == type_bytes(t.ty, 8) && lanes(tb) > lanes(t.ty) && (t.aux & ~DOT_SIGNED) == 0,
+                "an integer vector of the result's type and two of its bytes in narrower lanes",
             );
         }
         if op == O_VMULW {

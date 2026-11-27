@@ -130,6 +130,8 @@ def decode(b):
 
 GP32 = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi']
 GP64 = ['rax', 'rcx', 'rdx', 'rbx', 'rsp', 'rbp', 'rsi', 'rdi']
+GP16 = ['ax', 'cx', 'dx', 'bx', 'sp', 'bp', 'si', 'di']
+GP8 = ['al', 'cl', 'dl', 'bl', 'spl', 'bpl', 'sil', 'dil']
 
 def classify(o):
     o = o.strip()
@@ -139,15 +141,25 @@ def classify(o):
     m = re.fullmatch(r'%k(\d)', o)
     if m:
         return ('k', int(m.group(1)))
+    m = re.fullmatch(r'%tmm(\d)', o)
+    if m:
+        return ('t', int(m.group(1)))
     if re.fullmatch(r'%(e[a-d]x|e[sd]i|r\d+d)', o):
         return ('g32', 0)
     if re.fullmatch(r'%(r[a-d]x|r[sd]i|r\d+)', o):
         return ('g64', 0)
+    if re.fullmatch(r'%([a-d]x|[sd]i|r\d+w)', o):
+        return ('g16', 0)
+    if re.fullmatch(r'%([a-d]l|[sd]il|r\d+b)', o):
+        return ('g8', 0)
     if o.startswith('$'):
         return ('imm', 0)
     m = re.fullmatch(r'\(%r\w+,%([xyz])mm\d+,[^)]*\)', o)
     if m:
         return ('vsib' + m.group(1), 0)
+    # AMX's memory: a base and an index (the stride), a SIB byte.
+    if re.fullmatch(r'(-?\d+)?\(%r\w+,%r\w+(,\d)?\)', o):
+        return ('ms', 0)
     if o.startswith('(') or re.match(r'-?\d+\(', o):
         return ('mem', 0)
     raise Exception('operand ' + o)
@@ -190,10 +202,18 @@ def text(mn, ops, nums, mask, zero, memrep=None):
             parts.append('%xmm0')
         elif c == 'k':
             parts.append('%%k%d' % n)
+        elif c == 't':
+            parts.append('%%tmm%d' % n)
+        elif c == 'ms':
+            parts.append('64(%rax,%rcx)')
         elif c == 'g32':
             parts.append('%' + GP32[n])
         elif c == 'g64':
             parts.append('%' + GP64[n])
+        elif c == 'g16':
+            parts.append('%' + GP16[n])
+        elif c == 'g8':
+            parts.append('%' + GP8[n])
         elif c == 'imm':
             parts.append('$1')
         elif c == 'mem':
@@ -231,15 +251,19 @@ def kind_of(c, field, regonly):
     if c.startswith('vsib'):
         return 'VS' + c[4].upper()
     if field == 'vvvv':
-        return {'x': 'XV', 'y': 'YV', 'z': 'ZV', 'k': 'KV'}[c]
+        return {'x': 'XV', 'y': 'YV', 'z': 'ZV', 'k': 'KV', 't': 'TV', 'g32': 'RV', 'g64': 'RV'}[c]
     if field == 'reg':
-        return {'x': 'X', 'y': 'Y', 'z': 'Z', 'k': 'KR', 'g32': 'R32', 'g64': 'R64'}[c]
+        return {'x': 'X', 'y': 'Y', 'z': 'Z', 'k': 'KR', 't': 'T', 'g8': 'R8', 'g16': 'R16', 'g32': 'R32', 'g64': 'R64'}[c]
     assert field == 'rm', (c, field)
     if c == 'mem':
         return regonly  # the memory form's class, chosen by the caller
+    if c == 'ms':
+        return 'MS'
+    if c == 't':
+        return 'TR'
     if regonly is True:
-        return {'x': 'XR', 'y': 'YR', 'z': 'ZR', 'k': 'KRM', 'g32': 'RR32', 'g64': 'RR64'}[c]
-    return {'x': 'XM', 'y': 'YM', 'z': 'ZM', 'g32': 'RM32', 'g64': 'RM64'}[c]
+        return {'x': 'XR', 'y': 'YR', 'z': 'ZR', 'k': 'KRM', 'g8': 'RR8', 'g16': 'RR16', 'g32': 'RR32', 'g64': 'RR64'}[c]
+    return {'x': 'XM', 'y': 'YM', 'z': 'ZM', 'g8': 'RM8', 'g16': 'RM16', 'g32': 'RM32', 'g64': 'RM64'}[c]
 
 def same_op(a, b):
     return a is not None and b is not None and all(a[k] == b[k] for k in ('enc', 'op', 'pfx', 'W', 'L', 'map', 'rexw'))
@@ -260,7 +284,7 @@ def derive(mn, ops, mask, zero):
         if c in ('imm', 'x0'):
             fields.append(None)
             continue
-        if c in ('mem',) or c.startswith('vsib'):
+        if c in ('mem', 'ms') or c.startswith('vsib'):
             fields.append('rm')
             used.add('rm')
             continue
@@ -295,7 +319,10 @@ def derive(mn, ops, mask, zero):
     kinds = [None] * len(ops)
     if rmi is not None:
         c = ops[rmi][0]
-        if c == 'mem' or c.startswith('vsib'):
+        if c == 'ms':
+            fm = None
+            kinds[rmi] = 'MS'
+        elif c == 'mem' or c.startswith('vsib'):
             fm = f1
             # The register class the memory form shares its row with.
             mclass = 'M'
@@ -306,8 +333,11 @@ def derive(mn, ops, mask, zero):
                 if d is not None and d[0] == mn:
                     dops = split_ops(re.sub(r'\s*\{%k\d\}|\s*\{z\}', '', d[1]))
                     rc = classify(dops[rmi])[0]
-                    mclass = {'x': 'XM', 'y': 'YM', 'z': 'ZM', 'g32': 'RM32', 'g64': 'RM64'}[rc]
+                    mclass = {'x': 'XM', 'y': 'YM', 'z': 'ZM', 'g8': 'RM8', 'g16': 'RM16', 'g32': 'RM32', 'g64': 'RM64'}[rc]
             kinds[rmi] = mclass if c == 'mem' else kind_of(c, 'rm', None)
+        elif c == 't':
+            fm = None
+            kinds[rmi] = 'TR'
         else:
             t3 = text(mn, ops, numbering(ops, N1), mask, zero, (rmi, '64(%rax)'))
             e3 = mc([t3])[0]
@@ -350,7 +380,8 @@ def derive(mn, ops, mask, zero):
         c = ik[0].lower()
         e = mc(['%s %%%smm8, %%%smm1' % (mn, c, c)])[0]
         mv = e is not None and decode(e)['op'] != f1['op']
-    return {'sw': sw, 'swc': swc, 'mv': mv, 'mn': mn, 'op': f1['op'], 'pfx': f1['pfx'], 'digit': digit, 'enc': f1['enc'], 'W': f1['W'] or f1['rexw'],
+    modrm = None if f1['mod'] is None else f1['mod'] << 6 | (f1['reg'] & 7) << 3 | (f1['rm'] & 7)
+    return {'modrm': modrm, 'sw': sw, 'swc': swc, 'mv': mv, 'mn': mn, 'op': f1['op'], 'pfx': f1['pfx'], 'digit': digit, 'enc': f1['enc'], 'W': f1['W'] or f1['rexw'],
             'L': f1['L'], 'N': N, 'mk': mk, 'mz': mz, 'mr': mr, 'kinds': list(reversed(kinds)), 'rexw': f1['rexw'], 'text': t1}, None
 
 def ncode(N, L, enc):
@@ -364,11 +395,14 @@ def ncode(N, L, enc):
 
 def row_text(r):
     d = 'D' if r['digit'] is None else str(r['digit'])
+    # A ModRM byte the opcode fixes (no operand): `D_FIX | its index in the table's FIXED`.
+    if not r['kinds'] and r['modrm'] is not None:
+        d = 'D_FIX | %d' % FIXED.index(r['modrm'])
     ks = ', '.join('K::' + k for k in r['kinds'])
     kf = 'k%d(%s)' % (len(r['kinds']), ks) if r['kinds'] else '0'
+    if any(k.startswith('R') for k in r['kinds']) and (r['enc'] == 0 or not any(k[0] in 'XYZK' for k in r['kinds'])):
+        return None  # the sized general-register rows the table holds (legacy, and VEX's BMI forms)
     if r['enc'] == 0:
-        if any(k.startswith('R') for k in r['kinds']):
-            return None  # the sized general-register rows the table holds
         pf = '0x%X' % r['pfx'] if r['pfx'] else '0'
         return '    r("%s", 0x%X, %s, %s, 0, F_NOSFX, %s),' % (r['mn'], r['op'], pf, d, kf)
     vx = ['VEX' if r['enc'] == 1 else 'EVEX']
@@ -394,9 +428,12 @@ def row_text(r):
     pf = '0x%X' % r['pfx'] if r['pfx'] else '0'
     return '    v("%s", 0x%X, %s, %s, %s, %s),' % (r['mn'], r['op'], pf, d, ' | '.join(vx), kf)
 
+FIXED = []
+
 def main():
     tmpl = json.load(open(sys.argv[1]))
     existing = open(sys.argv[2]).read()
+    FIXED.extend(int(x, 0) for x in re.search(r'const FIXED: \[u8; \d+\] = \[([^]]*)\]', existing).group(1).split(','))
     shapes = {}
     for x in tmpl:
         for l in x.get('asm', []):
@@ -420,8 +457,8 @@ def main():
     errs = 0
     for (mn, cl, mask, zero), l in sorted(shapes.items()):
         ops = [(c, 0) for c in cl]
-        # The legacy xmm0 operand of blendv.
-        if mn in ('blendvps', 'blendvpd', 'pblendvb') and len(ops) == 3:
+        # The legacy xmm0 operand of blendv and sha256rnds2.
+        if mn in ('blendvps', 'blendvpd', 'pblendvb', 'sha256rnds2') and len(ops) == 3:
             ops[0] = ('x0', 0)
         variants = [(mask, zero)]
         if mask:

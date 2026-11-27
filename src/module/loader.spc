@@ -127,6 +127,11 @@ pub(package) struct ItemSched {
     /// carries its extend's. `body_hi` is a function's body block id (untagged), else 0.
     pub(package) top_lo: Vector<u32>,
     pub(package) body_hi: Vector<u32>,
+    /// `body_hi` over the pinned bodies past the declarations (`Ast.decl_end`): a function's body id.
+    pub(package) pin_hi: Vector<u32>,
+    /// Per item, the nodes of its pinned bodies past the declarations (an interface's: its members'
+    /// defaults), which its own module-arena range (`top_lo`) does not hold.
+    pub(package) pin_n: Vector<u32>,
     /// The member names of the builtin extends outside the prelude (`graph::items::builtin_edges`):
     /// the name's 32-bit hash << 32 | the extend item, sorted; `bmask` a bit per first byte and
     /// length class of those names, the prefilter of the scan.
@@ -151,7 +156,7 @@ pub(package) struct ItemSched {
 extend ItemSched {
     /// Approximate owned bytes.
     pub(package) const fn retained(self: &Self) usize {
-        return (self.key.capacity() + self.sig_hash.capacity()) * 8 + (self.pre_off.capacity() + self.pre_edges.capacity() + self.fin_off.capacity() + self.fin_edges.capacity() + self.comp.capacity() + self.by_node.capacity() + self.top_lo.capacity() + self.body_hi.capacity() + self.bnames.capacity() * 2 + self.cdep_off.capacity() + self.cdep.capacity() + self.citem_off.capacity() + self.citem.capacity()) * 4 + self.state.capacity() + self.ret_attr.capacity() + self.dyn_edges.get_ref().len() * 16;
+        return (self.key.capacity() + self.sig_hash.capacity()) * 8 + (self.pre_off.capacity() + self.pre_edges.capacity() + self.fin_off.capacity() + self.fin_edges.capacity() + self.comp.capacity() + self.by_node.capacity() + self.top_lo.capacity() + self.body_hi.capacity() + self.pin_hi.capacity() + self.pin_n.capacity() + self.bnames.capacity() * 2 + self.cdep_off.capacity() + self.cdep.capacity() + self.citem_off.capacity() + self.citem.capacity()) * 4 + self.state.capacity() + self.ret_attr.capacity() + self.dyn_edges.get_ref().len() * 16;
     }
 }
 
@@ -168,6 +173,29 @@ pub(package) struct ProveResume {
     pub(package) mods: Vector<bool>,
     pub(package) next: usize,
     pub(package) errs: errs::Errors,
+}
+
+/// What `lint --proofs` measured: the solver steps of the obligations (`lint --proofs --fix` keeps a
+/// change that lowers them), and the rewrites of costly proofs it proposes, by module and position. The
+/// lint shows a rewrite only when the file proves with fewer steps after it (`proof_hints` in main).
+pub(package) struct ProofLint {
+    pub(package) spent: u64,
+    pub(package) hints: Vector<ProofHint>,
+}
+
+/// A rewrite of the `assert` at [`start`, `end`) of module `module` (`prove::cost_warnings`): the lemma
+/// `lemma` (its text) before the item of the function at `item`, and its call `call` in place of the
+/// statement. `code` and `msg` are the warning's; `steps`, the solver steps of the function's proof.
+pub(package) struct ProofHint {
+    pub(package) module: u32,
+    pub(package) steps: u64,
+    pub(package) code: u16,
+    pub(package) start: u32,
+    pub(package) end: u32,
+    pub(package) item: u32,
+    pub(package) msg: String,
+    pub(package) lemma: String,
+    pub(package) call: String,
 }
 
 pub(package) struct Package {
@@ -190,8 +218,12 @@ pub(package) struct Package {
     /// sets `off` for a profile at opt-level 0 or 1).
     pub(package) simd_dispatch: String,
     /// The copies' feature sets: `simd_dispatch`'s levels beyond the build's, closed, by size (the
-    /// load computes them). Empty off x86_64 and with `off`.
+    /// load computes them); on arm64 Linux the target's run-time levels (`Target.run_time`: LSE and RCPC,
+    /// then CSSC too) beyond the build's. Empty elsewhere and with `off`.
     pub(package) simd_levels: Vector<cf::CpuFeatureSet>,
+    /// Per level of `simd_levels` from `Target.run_time`, the HWCAP and HWCAP2 bits that report it (two
+    /// words a level, `Target.run_time_hwcap`); empty for levels the CPU detector reports.
+    pub(package) simd_hwcap: Vector<u64>,
     /// The effective features of the `@target_feature` functions, joined (`check_feature_calls`): what
     /// some function of the program may plan with beyond `features`.
     pub(package) fn_union: cf::CpuFeatureSet,
@@ -328,6 +360,15 @@ pub(package) struct Package {
     /// The emission's capture summary (`ir::capture::CaptureStore`): which `&mut` parameters a call may let
     /// outlive it, set for the emission's lifetime by `cemit_package`; null outside it.
     pub(package) cap_store: *const void,
+    /// The functions with a body in the body arena or past the declarations that an evaluation whose
+    /// result reaches the code ran (the type check's and the emission's constants:
+    /// `ir::interp::Interp.reads`), as `site << 48 | module << 32 | node`, each once per site: the module
+    /// whose code or declarations the value reaches (`Interp::read_site`), `CE_SITE_NONE` when unknown.
+    /// The per-TU cache and the proof record keep them with their text, by site.
+    pub(package) ce_reads: UnsafeCell<Vector<u64>>,
+    /// The hash of the bounds checks the prover proved in each kept body, by its function's `module << 32
+    /// | node` (`prove_cached`): they shape the function's code and its inlined copies'.
+    pub(package) prove_fd: Map<u64, u64>,
     /// The items of the extern blocks whose header is scoped, as `module << 32 | node`
     /// (`scope_extern_items`); empty outside an emission.
     pub(package) xscoped: Set<u64>,
@@ -359,8 +400,8 @@ pub(package) struct Package {
     /// The C header files those facts were read from (`extern_ints`, `extern_objs`, `c_fns`, `opaque_cls`): inputs of the
     /// emission.
     pub(package) header_files: Vector<String>,
-    /// Per module, the offsets where its source's lines start, for the locations of LIR
-    /// (`driver::emit::lir_lines`); empty in a build that lowers no LIR.
+    /// Per module, the offsets where its source's lines start, for the locations of LIR and the per-TU
+    /// cache's keys (`driver::emit::lir_lines`); filled before the emission.
     pub(package) lines: Vector<Vector<u32>>,
     /// Whether the build writes native objects for its modules (a build whose link takes objects); set by
     /// `driver::emit::run_package`.
@@ -432,6 +473,22 @@ pub(package) struct Package {
     /// functions join the unused-item candidates instead of rooting the reachability graph. Set only
     /// for whole-program lints of manifests without a [lib] target (and for script builds).
     pub(package) lint_pub: bool,
+    /// `lint --proofs`: the lint runs the prover over its modules and reports the proofs that cost the
+    /// most and their causes (`prove::check_kept`).
+    pub(package) lint_proofs: bool,
+    /// What the proofs `lint --proofs` ran measured (`prove::check_kept`).
+    pub(package) proof_lint: ProofLint,
+    /// A probe of the rewrites of one function by `lint --proofs` (`proof_hints` in main), when not
+    /// empty: the prover proves only the function that holds offset `proof_only[0]` (a call the rewrites
+    /// put) and the functions at the other offsets (the lemmas they add); the rest of the file is as it
+    /// was.
+    pub(package) proof_only: Vector<u32>,
+    /// Such a probe's solver steps, when not 0, past which a prover stops: the rewrite cannot win.
+    pub(package) proof_cap: u64,
+    /// build.toml's `prove-steps`: the blocks, chain blocks and solver steps the proof of one body outside
+    /// std may spend; 0 = the prover's default (`prove::solver::STEP_BUDGET`). Part of the proof record's
+    /// key of each module outside std.
+    pub(package) prove_steps: u32,
     /// A compile asked for its program's LIR (an API client's): emission lowers every body to LIR, as under
     /// `SC_LIR=1`, and leaves the checked package's text form here. Null otherwise.
     pub(package) lir_out: *mut String,
@@ -601,6 +658,9 @@ pub(package) struct LookupHit {
 /// Dense index into PkgIndex.items; assigned in module order then source order, never from hash order.
 pub(package) type ItemId = u32;
 pub(package) const ITEM_NONE: ItemId = 0xFFFFFFFF;
+/// The site of an evaluator read (`Package.ce_reads`) whose module is not known: a change of it misses
+/// every module.
+pub(package) const CE_SITE_NONE: u32 = 0xFFFF;
 
 /// Dense insertion-order id into the package symbol interner.
 pub(package) type SymbolId = u32;
@@ -2777,6 +2837,15 @@ extend Package {
         return self.lazy_std && self.modules.at(m).prelude && !self.is_rt(m as i32) && m as i32 != self.rt_lanes;
     }
 
+    /// Whether `d` is a spec function or a lemma: ghost code, whose body no build runs.
+    pub(package) const fn ghost_fn(self: &Self, d: DefId) bool {
+        if d.node == NODE_NONE || (d.node & NODE_BODY) != 0 || !self.modules.at(d.module as usize).has_ast {
+            return false;
+        }
+        let a = unsafe &*self.module_ast_const(d.module);
+        return a.at_const(d.node).kind == NodeKind::NODE_FUNCTION && a.ext(d.node).function.is_ghost();
+    }
+
     /// Whether module `m` belongs to the standard library: a prelude file, or a module of `std::`.
     pub(package) const fn in_std(self: &Self, m: usize) bool {
         let pth = self.modules.at(m).path.as_str();
@@ -3136,7 +3205,7 @@ extend Package {
         if self.std_missing(std_dir) {
             return;
         }
-        self.simd_levels_compute();
+        self.simd_levels_compute(target);
         if self.load_prelude_files(std_dir, target) {
             self.add_build_module(target);
         }
@@ -8104,9 +8173,68 @@ extend Package {
     }
 
     // The copies' feature sets (`simd_levels`) of `simd_dispatch` over the build's features.
-    fn simd_levels_compute(self: &mut Self) {
+    /// Whether a level of `simd_levels` holds a vector backend entry the build's features do not: the
+    /// vector code's copies (`CEmit::dispatch_prologue`).
+    pub(package) const fn levels_plan_vectors(self: &Self) bool {
+        let build = cf::close(self.features);
+        for k in 0..self.simd_levels.len() {
+            for i in 0..self.simd_table.len() {
+                let efs = self.simd_table.at(i).fs;
+                if cf::contains(self.simd_levels[k], efs) && !cf::contains(build, efs) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /// Whether a level of `simd_levels` has a scalar feature the build's features lack, which a function's
+    /// run-time copy may take (`lir::ir::CPU_SCALAR`, the code generators' copies).
+    pub(package) const fn levels_add_scalar(self: &Self) bool {
+        let build = cf::close(self.features);
+        let names: [str; 9] = ["popcnt", "lzcnt", "bmi1", "bmi2", "movbe", "fma", "lse", "rcpc", "cssc"];
+        for k in 0..self.simd_levels.len() {
+            for nm in names {
+                let f = cf::find(nm, self.arch);
+                if f >= 0 && cf::row(f as usize).arch == self.arch && cf::has(self.simd_levels[k], f as usize) && !cf::has(
+                    build,
+                    f as usize,
+                ) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    fn simd_levels_compute(self: &mut Self, target: i32) {
         self.simd_levels.clear();
-        if !tgt::isa(self.arch).levels || cf::is_empty(self.features) || self.simd_dispatch.as_str() == "off" {
+        self.simd_hwcap.clear();
+        if cf::is_empty(self.features) || self.simd_dispatch.as_str() == "off" {
+            return;
+        }
+        // The target's run-time levels (`Target.run_time`: arm64 Linux's LSE and RCPC, then CSSC), each
+        // the build's features beyond: one the build has already is no level.
+        if let Some(r) = tgt::target_of(target, self.arch) {
+            if r.run_time.len() != 0 {
+                let mut q: usize = 0;
+                for lv in r.run_time.split(";") {
+                    let mut s = self.features;
+                    let mut err = String::new();
+                    if cf::apply(lv, target, self.arch, false, &mut s, &mut err) && !cf::contains(
+                        cf::close(self.features),
+                        s,
+                    ) {
+                        self.simd_levels.push(cf::close(s));
+                        self.simd_hwcap.push(r.run_time_hwcap[2 * q]);
+                        self.simd_hwcap.push(r.run_time_hwcap[2 * q + 1]);
+                    }
+                    q += 1;
+                }
+                return;
+            }
+        }
+        if !tgt::isa(self.arch).levels {
             return;
         }
         let spec = if self.simd_dispatch.len() == 0 {
@@ -8160,7 +8288,7 @@ extend Package {
     }
 
     fn load_prelude(self: &mut Self, std_dir: str, target: i32, user_vectors: bool) {
-        self.simd_levels_compute();
+        self.simd_levels_compute(target);
         if self.std_missing(std_dir) || !self.load_prelude_files(std_dir, target) {
             return;
         }
@@ -8313,8 +8441,13 @@ extend Package {
                     self.modules[id as usize].backend = true;
                 }
             }
-            // The run-time choice of the copies reads the CPU detector (`sc_cpu_words`).
-            if self.simd_levels.len() != 0 {
+            // The run-time choice of the copies reads the CPU detector (`sc_cpu_words`); a target's own
+            // run-time level the kernel's HWCAP bits (`Target.run_time_hwcap`).
+            let hwcap = switch tgt::target_of(target, self.arch) {
+                Some(r) => r.run_time_hwcap[0] != 0,
+                None => false,
+            };
+            if self.simd_levels.len() != 0 && !hwcap {
                 let cf9 = join2(dirname_of(std_dir), "ffi/sc_cpu.spc");
                 if dutil::file_mtime(&cf9) != 0 {
                     let _ = self.load_module("sc_cpu", &cf9, self.bootstrap, target);

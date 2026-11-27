@@ -6,6 +6,7 @@
 // (i, j) is the fused multiply-add chain over p in order, from +0.0. Prefer `std::simd::matrix`, which
 // checks the shapes and chooses a kernel by the CPU.
 import std::cpu;
+import std::simd;
 import stdlib;
 import string as cstring;
 
@@ -35,6 +36,23 @@ pub unsafe fn sc_sme_mul_f32(c: *mut f32, a: *const f32, b: *const f32, m: usize
     return 0;
 }
 
+/// `c` (m x n) += `a` (m x k) * `b` (k x n), row-major `f32`: each element's chain of fused
+/// multiply-adds starts from its value in `c`. Returns as `sc_sme_mul_f32`.
+@platform(macos | ios | linux | android)
+@arch(aarch64)
+@target_feature([cpu::Feature::Sme2])
+pub unsafe fn sc_sme_mul_add_f32(c: *mut f32, a: *const f32, b: *const f32, m: usize, k: usize, n: usize) i32 {
+    let l = (sc_sme_svl() / 4) as usize;
+    let panels = m / l + (m % l != 0) as usize;
+    let pa = panel(k, panels * l + 4 * l, 4) as *mut f32;
+    if pa == null {
+        return -1;
+    }
+    sc_sme_f32_acc_za(c, a, b, m, k, n, pa, pa + panels * l * k);
+    stdlib::free(pa);
+    return 0;
+}
+
 /// The same for `f64`.
 @platform(macos | ios | linux | android)
 @arch(aarch64)
@@ -56,6 +74,44 @@ pub unsafe fn sc_sme_mul_f64(c: *mut f64, a: *const f64, b: *const f64, m: usize
 @arch(aarch64)
 @target_feature([cpu::Feature::Sme2])
 pub unsafe fn sc_sme_mul_i8(c: *mut i32, a: *const i8, b: *const i8, m: usize, k: usize, n: usize) i32 {
+    return mul_i8_flip(c, a, b, m, k, n, 0);
+}
+
+/// `c` (m x n, i32) = `a` (m x k, u8) * `b` (k x n, i8), each element modulo 2^32: the i8 product of
+/// `a - 128` (each byte's top bit flipped), plus 128 times the sum of each column of `b`.
+@platform(macos | ios | linux | android)
+@arch(aarch64)
+@target_feature([cpu::Feature::Sme2])
+pub unsafe fn sc_sme_mul_u8i8(c: *mut i32, a: *const u8, b: *const i8, m: usize, k: usize, n: usize) i32 {
+    if mul_i8_flip(c, a as *const i8, b, m, k, n, 0x80) != 0 {
+        return -1;
+    }
+    let s = stdlib::malloc(n * 4 + 4) as *mut i32;
+    if s == null {
+        return -1;
+    }
+    for j in 0..n {
+        s[j] = 0;
+    }
+    for p in 0..k {
+        for j in 0..n {
+            s[j] = s[j].wrapping_add(b[p * n + j]);
+        }
+    }
+    for i in 0..m {
+        for j in 0..n {
+            c[i * n + j] = c[i * n + j].wrapping_add(s[j].wrapping_mul(128));
+        }
+    }
+    stdlib::free(s);
+    return 0;
+}
+
+// The i8 product of `a` with each byte xored with `flip` (0x80: a u8 matrix less 128), `b` as it is.
+@platform(macos | ios | linux | android)
+@arch(aarch64)
+@target_feature([cpu::Feature::Sme2])
+unsafe fn mul_i8_flip(c: *mut i32, a: *const i8, b: *const i8, m: usize, k: usize, n: usize, flip: u8) i32 {
     let l = (sc_sme_svl() / 4) as usize;
     let g = k / 4 + (k % 4 != 0) as usize;
     let pm = (m / l + (m % l != 0) as usize) * l;
@@ -78,41 +134,88 @@ pub unsafe fn sc_sme_mul_i8(c: *mut i32, a: *const i8, b: *const i8, m: usize, k
         for p in 4 * whole..k {
             dst[whole * 4 * l + p - 4 * whole] = src[p];
         }
-    }
-    // pb: per group, the four rows interleaved byte by byte over each panel's 4L columns (zeros past n
-    // and k); a whole group of a whole panel has no condition, which the C compiler vectorizes.
-    cstring::memset(pb, 0, pn * 4 * g);
-    let mut j: usize = 0;
-    while j < pn {
-        for q in 0..g {
-            let dst = pb + j * 4 * g + q * 16 * l;
-            if j + 4 * l <= n && 4 * q + 4 <= k {
-                let r0 = b + 4 * q * n + j;
-                let r1 = r0 + n;
-                let r2 = r1 + n;
-                let r3 = r2 + n;
-                for col in 0..4 * l {
-                    dst[col * 4] = r0[col];
-                    dst[col * 4 + 1] = r1[col];
-                    dst[col * 4 + 2] = r2[col];
-                    dst[col * 4 + 3] = r3[col];
-                }
-            } else {
-                let mut col: usize = 0;
-                while col < 4 * l && j + col < n {
-                    let mut t: usize = 0;
-                    while t < 4 && 4 * q + t < k {
-                        dst[col * 4 + t] = b[(4 * q + t) * n + j + col];
-                        t += 1;
-                    }
-                    col += 1;
+        // The row's bytes flipped, the padding past k kept 0.
+        if flip != 0 {
+            for q in 0..whole {
+                for t in 0..4usize {
+                    dst[q * 4 * l + t] = (dst[q * 4 * l + t] as u8 ^ flip) as i8;
                 }
             }
+            for p in 4 * whole..k {
+                dst[whole * 4 * l + p - 4 * whole] = (src[p] as u8 ^ flip) as i8;
+            }
+        }
+    }
+    // pb: per panel of 4L columns and group, the four rows by column in words (zeros past n and k).
+    cstring::memset(pb, 0, pn * 4 * g);
+    let mut j: usize = 0;
+    while j < n {
+        for q in 0..g {
+            simd::interleave_rows4(
+                (pb + j * 4 * g + q * 16 * l) as *mut u32,
+                (b + 4 * q * n + j) as *const u8,
+                n,
+                (k - 4 * q).min(4),
+                (n - j).min(4 * l),
+            );
         }
         j += 4 * l;
     }
     sc_sme_i8_za(c, pa, pb, m, g, n);
     stdlib::free(pa);
+    return 0;
+}
+
+/// `c` (m x n, i32) = `a` (m x k) * `b` (k x n), i16: each element the sum of the products modulo 2^32.
+/// `a` and `b` go in groups of two halfwords, one 32-bit word per row or column and group, laid out as
+/// the i8 kernel's groups of four bytes (`mul_i8_flip`).
+@platform(macos | ios | linux | android)
+@arch(aarch64)
+@target_feature([cpu::Feature::Sme2])
+pub unsafe fn sc_sme_mul_i16(c: *mut i32, a: *const i16, b: *const i16, m: usize, k: usize, n: usize) i32 {
+    let l = (sc_sme_svl() / 4) as usize;
+    let g = k / 2 + (k % 2 != 0) as usize;
+    let pm = (m / l + (m % l != 0) as usize) * l;
+    let pn = (n / (4 * l) + (n % (4 * l) != 0) as usize) * 4 * l;
+    // pa: pm rows of 2g halfwords; pb: pn columns of 2g halfwords; zeros past m, n and k.
+    let pa = panel(g, 2 * (pm + pn), 2) as *mut i16;
+    if pa == null {
+        return -1;
+    }
+    let pb = pa + pm * 2 * g;
+    cstring::memset(pa as *mut i8, 0, (pm + pn) * 4 * g);
+    for i in 0..m {
+        let dst = pa + i / l * 2 * l * g + i % l * 2;
+        for p in 0..k {
+            dst[p / 2 * 2 * l + p % 2] = a[i * k + p];
+        }
+    }
+    let mut j: usize = 0;
+    while j < n {
+        for q in 0..g {
+            let dst = pb + j * 2 * g + q * 8 * l;
+            let mut col: usize = 0;
+            while col < 4 * l && j + col < n {
+                dst[col * 2] = b[2 * q * n + j + col];
+                if 2 * q + 1 < k {
+                    dst[col * 2 + 1] = b[(2 * q + 1) * n + j + col];
+                }
+                col += 1;
+            }
+        }
+        j += 4 * l;
+    }
+    sc_sme_i16_za(c, pa, pb, m, g, n);
+    stdlib::free(pa);
+    return 0;
+}
+
+/// `dst` (n x m) = the transpose of `src` (m x n), 32-bit elements (moved as bits) on the ZA tile.
+@platform(macos | ios | linux | android)
+@arch(aarch64)
+@target_feature([cpu::Feature::Sme2])
+pub unsafe fn sc_sme_transpose32(dst: *mut u32, src: *const u32, m: usize, n: usize) i32 {
+    sc_sme_t32_za(dst, src, m, n);
     return 0;
 }
 
@@ -152,6 +255,34 @@ pub unsafe fn sc_sme_mul_f64(_c: *mut f64, _a: *const f64, _b: *const f64, _m: u
 @arch(aarch64)
 @target_feature([cpu::Feature::Sme2])
 pub unsafe fn sc_sme_mul_i8(_c: *mut i32, _a: *const i8, _b: *const i8, _m: usize, _k: usize, _n: usize) i32 {
+    return -1;
+}
+
+@platform(windows)
+@arch(aarch64)
+@target_feature([cpu::Feature::Sme2])
+pub unsafe fn sc_sme_mul_add_f32(_c: *mut f32, _a: *const f32, _b: *const f32, _m: usize, _k: usize, _n: usize) i32 {
+    return -1;
+}
+
+@platform(windows)
+@arch(aarch64)
+@target_feature([cpu::Feature::Sme2])
+pub unsafe fn sc_sme_mul_i16(_c: *mut i32, _a: *const i16, _b: *const i16, _m: usize, _k: usize, _n: usize) i32 {
+    return -1;
+}
+
+@platform(windows)
+@arch(aarch64)
+@target_feature([cpu::Feature::Sme2])
+pub unsafe fn sc_sme_transpose32(_dst: *mut u32, _src: *const u32, _m: usize, _n: usize) i32 {
+    return -1;
+}
+
+@platform(windows)
+@arch(aarch64)
+@target_feature([cpu::Feature::Sme2])
+pub unsafe fn sc_sme_mul_u8i8(_c: *mut i32, _a: *const u8, _b: *const i8, _m: usize, _k: usize, _n: usize) i32 {
     return -1;
 }
 
@@ -238,7 +369,9 @@ fn sc_sme_svl() u64 {
 // buffer, then TPIDR2_EL0 is cleared); then enter streaming mode with ZA on. Exit: leave streaming mode
 // with ZA off, restore, return. The slice index of a ZA access is w12.
 
-// c = a * b (f32), arguments in x0 to x7: c, a, b, m, k, n, pa, pb. L = SVL / 32. The whole of `a` is
+// c = a * b (f32), arguments in x0 to x7: c, a, b, m, k, n, pa, pb; from the entry `sc_sme_f32_acc_za`,
+// c += a * b: each block's tiles start from its rows of `c`, not zero (the flag at [sp, #144]).
+// L = SVL / 32. The whole of `a` is
 // packed first into panels of L rows, column-major (`pa`, ceil(m / L) * L * k floats, zero rows past m),
 // through tile 0 (rows in horizontally, columns out vertically). Then each block of 4L columns of `b`
 // is read in place when whole and a row is at most 1 KiB (the copy costs more than the strided reads
@@ -255,9 +388,15 @@ asm(M"(.text
 .arch_extension sme2
 .arch_extension sme-f64f64
 .p2align 4
+_sc_sme_f32_acc_za:
+sc_sme_f32_acc_za:
+mov x11, #1
+b 30f
 _sc_sme_f32_za:
 sc_sme_f32_za:
-stp d8, d9, [sp, #-144]!
+mov x11, #0
+30:
+stp d8, d9, [sp, #-160]!
 stp d10, d11, [sp, #16]
 stp d12, d13, [sp, #32]
 stp d14, d15, [sp, #48]
@@ -266,6 +405,7 @@ stp x21, x22, [sp, #80]
 stp x23, x24, [sp, #96]
 stp x25, x26, [sp, #112]
 stp x27, x28, [sp, #128]
+str x11, [sp, #144]
 mrs x8, TPIDR2_EL0
 cbz x8, 23f
 ldrh w9, [x8, #10]
@@ -387,6 +527,20 @@ sub x13, x3, x11
 cmp x13, x8
 csel x13, x13, x8, lo
 zero {za}
+ldr x14, [sp, #144]
+cbz x14, 17f
+mov w12, #0
+mov x15, x1
+18:
+ld1w {za0h.s[w12, 0]}, p4/z, [x15]
+ld1w {za1h.s[w12, 0]}, p5/z, [x15, x8, lsl #2]
+ld1w {za2h.s[w12, 0]}, p6/z, [x15, x27, lsl #2]
+ld1w {za3h.s[w12, 0]}, p7/z, [x15, x28, lsl #2]
+add x15, x15, x24
+add w12, w12, #1
+cmp x12, x13
+b.lo 18b
+17:
 cbz x4, 15f
 mov x14, x4
 mov x15, x22
@@ -432,7 +586,7 @@ ldp x19, x20, [sp, #64]
 ldp d14, d15, [sp, #48]
 ldp d12, d13, [sp, #32]
 ldp d10, d11, [sp, #16]
-ldp d8, d9, [sp], #144
+ldp d8, d9, [sp], #160
 ret)");
 
 // c = a * b (f64), arguments as the f32 kernel's. L = SVL / 64. As the f32 kernel, with blocks of
@@ -667,15 +821,23 @@ ret)");
 // four (`sc_sme_mul_i8`): pa holds, per panel of L rows and per group, each row's four bytes; pb, per
 // panel of 4L columns and per group, each column's four bytes. Zeros pad the rows, columns and the last
 // group. Each L x 4L block takes one A vector and one four-vector load of B per group, one SMOPA per
-// tile. Integer sums wrap modulo 2^32 in any order: the portable kernel's results.
+// tile. Integer sums wrap modulo 2^32 in any order: the portable kernel's results. From the entry
+// `sc_sme_i16_za` (x6 = 1), the same for i16: a group is two halfwords per row or column, the same 32-bit
+// word, and each SMOPA adds two products (`sc_sme_mul_i16`).
 @platform(macos | ios | linux | android)
 @arch(aarch64)
 asm(M"(.text
 .arch_extension sme2
 .arch_extension sme-f64f64
 .p2align 4
+_sc_sme_i16_za:
+sc_sme_i16_za:
+mov x6, #1
+b 30f
 _sc_sme_i8_za:
 sc_sme_i8_za:
+mov x6, #0
+30:
 stp d8, d9, [sp, #-144]!
 stp d10, d11, [sp, #16]
 stp d12, d13, [sp, #32]
@@ -743,6 +905,7 @@ cbz x4, 15f
 mov x14, x4
 mov x15, x21
 mov x16, x20
+cbnz x6, 24f
 14:
 ld1b {z0.b}, p0/z, [x15]
 ld1b {z4.b-z7.b}, pn8/z, [x16]
@@ -754,6 +917,18 @@ add x15, x15, x9
 add x16, x16, x25
 subs x14, x14, #1
 b.ne 14b
+b 15f
+24:
+ld1b {z0.b}, p0/z, [x15]
+ld1b {z4.b-z7.b}, pn8/z, [x16]
+smopa za0.s, p0/m, p0/m, z0.h, z4.h
+smopa za1.s, p0/m, p0/m, z0.h, z5.h
+smopa za2.s, p0/m, p0/m, z0.h, z6.h
+smopa za3.s, p0/m, p0/m, z0.h, z7.h
+add x15, x15, x9
+add x16, x16, x25
+subs x14, x14, #1
+b.ne 24b
 15:
 mov w12, #0
 mov x15, x19
@@ -788,6 +963,104 @@ ldp d10, d11, [sp, #16]
 ldp d8, d9, [sp], #144
 ret)");
 
+// dst (n x m) = the transpose of src (m x n), 32-bit elements, arguments in x0 to x3: dst, src, m, n.
+// L = SVL / 32. Per L x L block, the source rows go into tile 0 horizontally (lanes past n not loaded:
+// p0) and its columns out vertically (lanes past m not stored: p1), each a whole row of the result.
+@platform(macos | ios | linux | android)
+@arch(aarch64)
+asm(M"(.text
+.arch_extension sme2
+.arch_extension sme-f64f64
+.p2align 4
+_sc_sme_t32_za:
+sc_sme_t32_za:
+stp d8, d9, [sp, #-144]!
+stp d10, d11, [sp, #16]
+stp d12, d13, [sp, #32]
+stp d14, d15, [sp, #48]
+stp x19, x20, [sp, #64]
+stp x21, x22, [sp, #80]
+stp x23, x24, [sp, #96]
+stp x25, x26, [sp, #112]
+stp x27, x28, [sp, #128]
+mrs x8, TPIDR2_EL0
+cbz x8, 23f
+ldrh w9, [x8, #10]
+ldr w10, [x8, #12]
+orr w9, w9, w10
+cbz w9, 20f
+udf #0
+20:
+ldr x9, [x8]
+cbz x9, 22f
+rdsvl x10, #1
+mov w12, #0
+21:
+str za[w12, 0], [x9]
+addsvl x9, x9, #1
+add w12, w12, #1
+cmp x12, x10
+b.lo 21b
+22:
+msr TPIDR2_EL0, xzr
+23:
+smstart
+cntw x8
+cbz x2, 9f
+cbz x3, 9f
+lsl x24, x3, #2
+lsl x25, x2, #2
+mov x10, #0
+1:
+whilelo p1.s, x10, x2
+sub x13, x2, x10
+cmp x13, x8
+csel x13, x13, x8, lo
+mov x11, #0
+2:
+whilelo p0.s, x11, x3
+sub x14, x3, x11
+cmp x14, x8
+csel x14, x14, x8, lo
+mul x15, x10, x3
+add x15, x15, x11
+add x15, x1, x15, lsl #2
+mov w12, #0
+3:
+ld1w {za0h.s[w12, 0]}, p0/z, [x15]
+add x15, x15, x24
+add w12, w12, #1
+cmp x12, x13
+b.lo 3b
+mul x16, x11, x2
+add x16, x16, x10
+add x16, x0, x16, lsl #2
+mov w12, #0
+4:
+st1w {za0v.s[w12, 0]}, p1, [x16]
+add x16, x16, x25
+add w12, w12, #1
+cmp x12, x14
+b.lo 4b
+add x11, x11, x8
+cmp x11, x3
+b.lo 2b
+add x10, x10, x8
+cmp x10, x2
+b.lo 1b
+9:
+smstop
+ldp x27, x28, [sp, #128]
+ldp x25, x26, [sp, #112]
+ldp x23, x24, [sp, #96]
+ldp x21, x22, [sp, #80]
+ldp x19, x20, [sp, #64]
+ldp d14, d15, [sp, #48]
+ldp d12, d13, [sp, #32]
+ldp d10, d11, [sp, #16]
+ldp d8, d9, [sp], #144
+ret)");
+
 // The kernels' symbols: Mach-O spells a C name with a leading `_`, ELF without, so each kernel above
 // carries both labels and the object format's directives below make its own one global and hidden.
 @platform(macos | ios)
@@ -798,6 +1071,12 @@ asm(M"(.globl _sc_sme_f32_za
 .private_extern _sc_sme_f64_za
 .globl _sc_sme_i8_za
 .private_extern _sc_sme_i8_za
+.globl _sc_sme_t32_za
+.private_extern _sc_sme_t32_za
+.globl _sc_sme_i16_za
+.private_extern _sc_sme_i16_za
+.globl _sc_sme_f32_acc_za
+.private_extern _sc_sme_f32_acc_za
 )");
 
 @platform(linux | android)
@@ -811,6 +1090,15 @@ asm(M"(.globl sc_sme_f32_za
 .globl sc_sme_i8_za
 .hidden sc_sme_i8_za
 .type sc_sme_i8_za, %function
+.globl sc_sme_t32_za
+.hidden sc_sme_t32_za
+.type sc_sme_t32_za, %function
+.globl sc_sme_i16_za
+.hidden sc_sme_i16_za
+.type sc_sme_i16_za, %function
+.globl sc_sme_f32_acc_za
+.hidden sc_sme_f32_acc_za
+.type sc_sme_f32_acc_za, %function
 )");
 
 @platform(macos | ios | linux | android)
@@ -837,4 +1125,16 @@ extern "C" {
         pb: *mut f64,
     );
     fn sc_sme_i8_za(c: *mut i32, pa: *const i8, pb: *const i8, m: usize, g: usize, n: usize);
+    fn sc_sme_t32_za(dst: *mut u32, src: *const u32, m: usize, n: usize);
+    fn sc_sme_i16_za(c: *mut i32, pa: *const i16, pb: *const i16, m: usize, g: usize, n: usize);
+    fn sc_sme_f32_acc_za(
+        c: *mut f32,
+        a: *const f32,
+        b: *const f32,
+        m: usize,
+        k: usize,
+        n: usize,
+        pa: *mut f32,
+        pb: *mut f32,
+    );
 }

@@ -86,8 +86,8 @@ fn aarch64_baselines_and_c_flags() {
     let lin = tgt::baseline(2, 1);
     let ios = tgt::baseline(4, 1);
     assert(
-        cf::count(lin) == 1 && cf::count(ios) == 3 && cf::count(mac) == 10,
-        "neon; aes, sha2; fp16 dotprod rdm sha3 crc lse rcpc",
+        cf::count(lin) == 1 && cf::count(ios) == 4 && cf::count(mac) == 12,
+        "neon; aes, pmull, sha2; fp16 dotprod rdm sha3 sha512 crc lse rcpc",
     );
     assert(tgt::baseline(0, 1).w[0] == lin.w[0] && tgt::baseline(5, 1).w[0] == lin.w[0], "Windows and Android: neon");
     let mut f = String::new();
@@ -115,6 +115,14 @@ fn aarch64_baselines_and_c_flags() {
     f.clear();
     cf::push_c_flags(cf::close(cf::with(lin, 11)), 2, 1, &mut f);
     assert_eq(f.as_str(), " -march=armv8.2-a+sha2+sha3");
+    // FEAT_SHA512 and FEAT_SHA3 share `+sha3`, FEAT_PMULL and FEAT_AES `+aes`: each flag once.
+    let both = cf::close(cf::with(cf::with(lin, cf::find("sha512", 1) as usize), cf::find("pmull", 1) as usize));
+    f.clear();
+    cf::push_c_flags(both, 2, 1, &mut f);
+    assert_eq(f.as_str(), " -march=armv8.2-a+aes+sha2+sha3");
+    f.clear();
+    cf::push_target_attr(both, lin, 2, &mut f);
+    assert(f.as_str().find("+aes+sha2+sha3") >= 0 && f.as_str().find("+sha3+") < 0, f.as_str());
     let mut a = tgt::baseline(1, 1);
     assert(!cf::apply("+sve", 1, 1, true, &mut a, &mut err), "no Apple core has SVE");
     assert_eq(err.as_str(), "target feature 'sve' exists on no macos machine");

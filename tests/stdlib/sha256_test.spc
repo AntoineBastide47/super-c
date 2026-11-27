@@ -1,16 +1,21 @@
 // std::crypto::sha256 against the digests of FIPS 180-4's examples (NIST's "Example Algorithms") and of
 // messages at each padding boundary: 55 bytes leave room for the length in the last block, 56 do not, 64
-// fill a block.
+// fill a block. Each digest twice: `sha256` with the processor's SHA-256 instructions where the host has
+// them (arm64 FEAT_SHA256, x86-64 SHA-NI), and `sha256_portable` without.
 import std::crypto::secret as *;
 import std::crypto::sha256 as *;
 
-// The digest of `msg` as lowercase hex.
-fn hex_digest(msg: []u8) String {
+// The digest of `msg` as lowercase hex, by `sha256_portable` when `portable`.
+fn hex_of(msg: []u8, portable: bool) String {
     let mut v = Vector::<Secret<u8>>::with_capacity(msg.len());
     for b in msg {
         v.push(Secret::new(b));
     }
-    let d = sha256(&v);
+    let d = if portable {
+        sha256_portable(&v)
+    } else {
+        sha256(&v)
+    };
     let digits = "0123456789abcdef";
     let mut s = String::new();
     for i in 0usize..32 {
@@ -19,6 +24,13 @@ fn hex_digest(msg: []u8) String {
         s.push_byte(digits.byte_at((b & 15) as usize));
     }
     return s;
+}
+
+// The digest of `msg` as lowercase hex, by both paths, which agree.
+fn hex_digest(msg: []u8) String {
+    let h = hex_of(msg, false);
+    assert_eq(h.as_str(), hex_of(msg, true).as_str());
+    return h;
 }
 
 // The bytes of `text`.
@@ -98,4 +110,20 @@ fn padding_boundaries() {
         hex_digest(ramp(120).as_slice()).as_str(),
         "8e3b15d9fea7472655aa069620b7f8c2e55ee1499f763200a7515fe826e99d20",
     );
+}
+
+// Both paths agree on every length up to five blocks and on longer messages, of bytes that differ.
+@test
+fn hardware_and_portable_paths_agree() {
+    let mut x: u64 = 0x9E3779B97F4A7C15;
+    let mut msg = Vector::<u8>::with_capacity(1100);
+    for n in 0usize..1100 {
+        if n <= 320 || n % 97 == 0 {
+            let _ = hex_digest(&msg);
+        }
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        msg.push(x as u8);
+    }
 }

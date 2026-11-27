@@ -462,6 +462,9 @@ extend<A: Allocator> String<A> {
     // --- append --------------------------------------------------------------------------------.
 
     /// Append the bytes of `src` (the bulk primitive the other appenders build on).
+    // Out of line: each representation has its own copy, too large for every append site (inlined, they
+    // made the compiler 6% larger and its build no faster).
+    @noinline
     pub fn push_bytes(self: &mut String<A>, src: Slice<u8>)
         panics if self.view().len() + src.view().len() >= LARGE_BIT as int
         ensures self.view() == old(self.view()).concat(src.view())
