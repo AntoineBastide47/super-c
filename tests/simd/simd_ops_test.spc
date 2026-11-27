@@ -737,7 +737,8 @@ fn mask_counts_summed_in_loops_match() {
     }
     assert(m.len() == 0, "a release build counts as a debug build");
     assert(h::diff_run(&r, "").exit == 0, "the count of equal elements is their count");
-    if ARCH == Arch::X86_64 {
+    // In the vector lane the program is wasm32: no x86-64 copies or levels.
+    if ARCH == Arch::X86_64 && !h::simd_lane() {
         let s = h::diff_build(MASK_COUNTS, ["--profile=release", "--simd-dispatch=off"]);
         assert(s.built, "the program builds without run-time copies");
         let n = h::same_runs(&d, &s, [""]);

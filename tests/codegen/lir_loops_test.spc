@@ -2252,7 +2252,7 @@ fn an_unrolled_reduction_keeps_an_accumulator_per_copy() {
         let (before, after) = optimized(&src, UNROLL);
         let t = text_of(&after, "r");
         let pat = format("= {}.i32", unsafe ops[k]);
-        assert(count(&t, pat.as_str()) == 8 && count(&t, "= mul.i32") == 5, t.as_str());
+        assert(count(&t, &pat) == 8 && count(&t, "= mul.i32") == 5, t.as_str());
         for s in starts {
             for n in counts {
                 let args: [u64; 2] = [n, s];
@@ -2490,7 +2490,7 @@ fn extremes_split(fmin: str, ops: str, fmax: str, xv: str, vminnum: u8, mins: u3
     let t = text_of(&after, "fm");
     let pmin = format("= vop.min{}.v4f32", fmin);
     let pmax = format("= vop.max{}.v4f32", fmax);
-    assert(count(&t, pmin.as_str()) == mins && count(&t, pmax.as_str()) == maxs, t.as_str());
+    assert(count(&t, &pmin) == mins && count(&t, &pmax) == maxs, t.as_str());
     let offs: [u64; 5] = [0, 3, 30, 32, 48];
     let counts: [u64; 7] = [0, 4, 12, 16, 20, 30, 32];
     for o in offs {

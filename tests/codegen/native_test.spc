@@ -24378,11 +24378,8 @@ b0(v0: ptr, v1: i64, v2: i64, v3: ptr):
     for isa in ["x86_64", "aarch64"] {
         let mut a = Vector::<u8>::new();
         let mut b = Vector::<u8>::new();
-        assert(object_of(checked.as_str(), tgt::axis_index("linux", false), tgt::axis_index(isa, true), 0, &mut a), isa);
-        assert(
-            object_of(unchecked.as_str(), tgt::axis_index("linux", false), tgt::axis_index(isa, true), 0, &mut b),
-            isa,
-        );
+        assert(object_of(&checked, tgt::axis_index("linux", false), tgt::axis_index(isa, true), 0, &mut a), isa);
+        assert(object_of(&unchecked, tgt::axis_index("linux", false), tgt::axis_index(isa, true), 0, &mut b), isa);
         assert(holds_name(&a, "__sc_vec_bounds") && !holds_name(&b, "__sc_vec_bounds"), isa);
     }
     if !cli::has_cc() {
@@ -24390,19 +24387,20 @@ b0(v0: ptr, v1: i64, v2: i64, v3: ptr):
     }
     let drv = M"(#include <stdint.h>
 struct slice { int32_t *p; uint64_t n; };
-uint64_t pack(struct slice *, uint64_t, uint64_t, const int32_t *);
+uint64_t pack(struct slice, uint64_t, uint64_t, const int32_t *);
+void __sc_vec_bounds(uint64_t w, uint64_t i, uint64_t n) { __builtin_trap(); }
 int main(void) {
   int32_t v[8] = {1, 2, 3, 4, 5, 6, 7, 8}, o[12];
   for (int k = 0; k < 12; k++) o[k] = 90 + k;
   struct slice s = {o, 8};
-  if (pack(&s, 3, 0xB5, v) != 5) return 1;
+  if (pack(s, 3, 0xB5, v) != 5) return 1;
   int32_t w[5] = {1, 3, 5, 6, 8};
   for (int k = 0; k < 12; k++) if (o[k] != (k >= 3 && k < 8 ? w[k - 3] : 90 + k)) return 2 + k;
   return 0;
 }
 )";
-    assert_eq(run_native(checked.as_str(), drv), 0);
-    assert_eq(run_native(unchecked.as_str(), drv), 0);
+    assert_eq(run_native(&checked, drv), 0);
+    assert_eq(run_native(&unchecked, drv), 0);
 }
 
 // x86-64 counts the lanes of a checked `compress_store` by POPCNT where the processor has it: no constant

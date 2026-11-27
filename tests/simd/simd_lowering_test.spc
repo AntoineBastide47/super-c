@@ -240,7 +240,7 @@ fn compress_store_by_chunks_writes_its_count_inside_its_window() {
 // and every element before `start`, from `start + N` on or from `len` on keeps its value (the others after
 // the stored ones may hold any).
 @noinline
-fn stored<T: SimdElement, const N: usize>(m: u64, start: usize, len: usize) bool {
+const fn stored<T: SimdElement, const N: usize>(m: u64, start: usize, len: usize) bool {
     let v = (simd::iota::<i32, N>() + Simd::<i32, N>::splat(1)).cast::<T>();
     let mut o = [v[0]; 40];
     for c in 0..5usize {
@@ -278,7 +278,7 @@ fn stored<T: SimdElement, const N: usize>(m: u64, start: usize, len: usize) bool
 // loop stores exactly), one element before the vector's lanes from the start, at them (whole steps), and
 // after them.
 fn stored_all<const N: usize>(m: u64, start: usize) {
-    let count = (m & (1u64 << N as u64) - 1).count_ones() as usize;
+    let count = (m & (1u64 << N as u64) - 1).count_ones();
     for len in [start + count, start + N - 1, start + N, 24usize] {
         if len < start + count {
             continue;
@@ -292,7 +292,7 @@ fn stored_all<const N: usize>(m: u64, start: usize) {
 
 // `stored_all` for lanes of 8 bytes, of at most 8 lanes.
 fn stored_wide<const N: usize>(m: u64, start: usize) {
-    let count = (m & (1u64 << N as u64) - 1).count_ones() as usize;
+    let count = (m & (1u64 << N as u64) - 1).count_ones();
     for len in [start + count, start + N - 1, start + N, 24usize] {
         if len < start + count {
             continue;
@@ -323,10 +323,10 @@ fn compress_store_of_every_mask_changes_nothing_outside_its_window() {
 }
 
 // Mask bits `m` of `n` lanes without their highest set bits past `room` of them.
-fn fitted(m: u64, n: usize, room: usize) u64 {
+const fn fitted(m: u64, n: usize, room: usize) u64 {
     let mut r = m & (1u64 << n as u64) - 1;
     for i in 0..n {
-        if r.count_ones() as usize <= room {
+        if r.count_ones() <= room {
             break;
         }
         r &= ~(1u64 << (n - 1 - i) as u64);
@@ -337,7 +337,7 @@ fn fitted(m: u64, n: usize, room: usize) u64 {
 // `stored` of `N` lanes of `T` into every destination of 0 to `2 * N` elements from every start in it,
 // under masks whose count fits: none, the lowest and the highest lanes that fill the destination exactly
 // (or every lane), and every second lane from lane 0 and from lane 1.
-fn stored_everywhere<T: SimdElement, const N: usize>() bool {
+const fn stored_everywhere<T: SimdElement, const N: usize>() bool {
     let all = (1u64 << N as u64) - 1;
     for len in 0..2 * N + 1 {
         for start in 0..len + 1 {
@@ -410,7 +410,7 @@ fn unchecked_gathers_load_each_active_lane() {
 
 // Whether lane `j` of `g` is element `(7j + 3) % 32` of the gathered slice (3 times its place plus 1) where
 // `m` has it, else the fallback's `100 + j`.
-fn lanes_are<T: SimdElement, const N: usize>(g: Simd<T, N>, m: u64) bool {
+const fn lanes_are<T: SimdElement, const N: usize>(g: Simd<T, N>, m: u64) bool {
     let a = g.cast::<i32>().to_array();
     for j in 0..N {
         let want = if (m >> j as u64 & 1) != 0 {
@@ -431,7 +431,7 @@ fn lanes_are<T: SimdElement, const N: usize>(g: Simd<T, N>, m: u64) bool {
 // that gather whole), checked under the mask of every lane and under `rt` (one range test, `lir::lower`
 // `gather_checked`).
 @noinline
-fn gathered<T: SimdElement, const N: usize>(rt: u64) bool {
+const fn gathered<T: SimdElement, const N: usize>(rt: u64) bool {
     let mut x = [simd::iota::<T, 2>()[0]; 32];
     for c in 0..4usize {
         simd::store(
@@ -455,7 +455,7 @@ fn gathered<T: SimdElement, const N: usize>(rt: u64) bool {
 
 // `gathered` through 8-byte indices, of at most 8 lanes.
 @noinline
-fn gathered_wide<T: SimdElement, const N: usize>(rt: u64) bool {
+const fn gathered_wide<T: SimdElement, const N: usize>(rt: u64) bool {
     let mut x = [simd::iota::<T, 2>()[0]; 32];
     for c in 0..4usize {
         simd::store(
@@ -536,7 +536,7 @@ fn a_tree_sum_adds_by_halves() {
 // operation (`lir::opt` `lane_call`): `out` takes the sum, difference, product, `and`, `or` and `xor` of
 // the first lanes of `a` and `b`, one vector after the other.
 @noinline
-fn int_lanes_u8(a: []u8, b: []u8, out: []mut u8) {
+const fn int_lanes_u8(a: []u8, b: []u8, out: []mut u8) {
     let (x, y) = (simd::load::<u8, 16>(a, 0), simd::load::<u8, 16>(b, 0));
     simd::store(out, 0, x.wrapping_add(y));
     simd::store(out, 16, x.wrapping_sub(y));
@@ -547,7 +547,7 @@ fn int_lanes_u8(a: []u8, b: []u8, out: []mut u8) {
 }
 
 @noinline
-fn int_lanes_u16(a: []u16, b: []u16, out: []mut u16) {
+const fn int_lanes_u16(a: []u16, b: []u16, out: []mut u16) {
     let (x, y) = (simd::load::<u16, 4>(a, 0), simd::load::<u16, 4>(b, 0));
     simd::store(out, 0, x.wrapping_add(y));
     simd::store(out, 4, x.wrapping_sub(y));
@@ -558,7 +558,7 @@ fn int_lanes_u16(a: []u16, b: []u16, out: []mut u16) {
 }
 
 @noinline
-fn int_lanes_u32(a: []u32, b: []u32, out: []mut u32) {
+const fn int_lanes_u32(a: []u32, b: []u32, out: []mut u32) {
     let (x, y) = (simd::load::<u32, 4>(a, 0), simd::load::<u32, 4>(b, 0));
     simd::store(out, 0, x.wrapping_add(y));
     simd::store(out, 4, x.wrapping_sub(y));
@@ -569,7 +569,7 @@ fn int_lanes_u32(a: []u32, b: []u32, out: []mut u32) {
 }
 
 @noinline
-fn int_lanes_u64(a: []u64, b: []u64, out: []mut u64) {
+const fn int_lanes_u64(a: []u64, b: []u64, out: []mut u64) {
     let (x, y) = (simd::load::<u64, 2>(a, 0), simd::load::<u64, 2>(b, 0));
     simd::store(out, 0, x.wrapping_add(y));
     simd::store(out, 2, x.wrapping_sub(y));
@@ -582,7 +582,7 @@ fn int_lanes_u64(a: []u64, b: []u64, out: []mut u64) {
 // The sum, difference, product and quotient of the first 4 lanes of `a` and `b` and the square root of
 // those of `b`.
 @noinline
-fn float_lanes(a: []f32, b: []f32, out: []mut f32) {
+const fn float_lanes(a: []f32, b: []f32, out: []mut f32) {
     let (x, y) = (simd::load::<f32, 4>(a, 0), simd::load::<f32, 4>(b, 0));
     simd::store(out, 0, x + y);
     simd::store(out, 4, x - y);
