@@ -284,9 +284,9 @@ lanes and before `s[start + N]` may hold any value (the std rule). A step's acti
 front through a table row of the step's mask bits: 32 bytes as 8 lanes of 4 bytes by a row's 8 byte
 indices widened (a lane of 8 bytes two of them; `swizzle_zero` `VOP_UNCHECKED`, every index in range:
 x86-64's VPMOVZXBD and VPERMD) where the body's registers hold 32 bytes, else 16 or 8 bytes by the `u8`
-`swizzle_zero` entry. The running offset grows by the step's lane count, a bit count where the body's
-processor has the instruction (`Cpu.popcnt`, `Cpu.cssc`: the per-level copies know), else a second
-table's byte. Where no entry swizzles bytes (x86-64 before SSSE3) the lanes of 2 bytes or more go one by
+`swizzle_zero` entry. The running offset grows by the step's lane count, a byte of a second table by
+the step's mask bits (no bit count: the byte is one load on every target, and wasm32's `popcnt` is not
+one instruction on every host). Where no entry swizzles bytes (x86-64 before SSSE3) the lanes of 2 bytes or more go one by
 one in groups of 4: each lane stored past the group's active lanes before it, whose count is a byte of
 the group's table row (16 rows of 4 bytes), the row's last byte the group's count, so no bit is counted
 and no lane tested. Without `N` elements after `start` (the end of the slice, a slice shorter than the
@@ -297,8 +297,8 @@ half's mask bits), since every store then ends in the slice. The byte shuffle's 
 path's block; the other forms have a rare block of their own, so that the fast path's block keeps one
 predecessor. Else the bounds trap of a count past the slice (`__sc_vec_bounds`), then the lane loop,
 which stores exactly and checks nothing (`VOP_UNCHECKED` on the `SIMD_COMPRESS_STORE`: the three
-generators emit no count and no test). The count is a bit count of the mask before the tests where a
-shuffle moves the steps, else the sum of the groups' table bytes. A checked gather (`gather_checked`) compares all
+generators emit no count and no test). The count, made before the tests, is the sum of the steps' (or
+the groups') table bytes. A checked gather (`gather_checked`) compares all
 its indices with the length at once (`SIMD_CMP_GE` into mask bits, the length capped at a narrower index
 lane's greatest value; under a length past that value no lane counts), traps in a failure block when an
 active lane's bit is set (`__sc_lane_bounds` with the lowest such lane, its index read from the indices

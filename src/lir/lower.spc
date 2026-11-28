@@ -4938,8 +4938,8 @@ extend Lower {
     }
 
     // Each step's table row (by its `cl` mask bits of `m`) and its offset in lanes from the start, for
-    // `compress_chunks`: a step's lane count is the bit count of its mask bits (`pop`), else byte r of the
-    // count table `tcnt`, else (no shuffle, `ub` 0) the last byte of its row of `tbl`. The offset past the
+    // `compress_chunks`: a shuffled step's lane count is byte r of the count table `tcnt` (r its mask
+    // bits), else (no shuffle, `ub` 0) the last byte of its row of `tbl`. The offset past the
     // last step, the call's count, where no shuffle is (the last step of shuffled ones is not counted).
     fn compress_rows(
         self: &mut Self,
@@ -4947,7 +4947,6 @@ extend Lower {
         steps: u32,
         cl: u32,
         ub: u32,
-        pop: bool,
         tbl: Value,
         tcnt: Value,
         rws: &mut Vector<Value>,
@@ -4965,9 +4964,7 @@ extend Lower {
             if ub != 0 && j + 1 == steps {
                 break;
             }
-            let pc = if pop {
-                self.inst(O_POPCNT, T_I64, 0, bits, VNONE, VNONE)
-            } else if ub != 0 {
+            let pc = if ub != 0 {
                 self.load(T_I8, self.ptradd(tcnt, row, 1, 0), 0, true)
             } else {
                 self.load(T_I8, self.ptradd(tbl, row, cl, cl - 1), 0, true)
@@ -5038,8 +5035,8 @@ extend Lower {
     // may leave with any value, so no store is masked and nothing reads the slice. By steps of 32, 16 or 8
     // bytes: a step's active lanes move to the front by one shuffle through a row of a read-only table by
     // the step's mask bits, and the whole step is stored at the running offset, which grows by the step's
-    // lane count (a bit count where the processor has the instruction, else a second table's byte). A step
-    // of 32 bytes, where the body's registers hold them, is 8 lanes of 4 bytes (a lane of 8, two) moved by
+    // lane count (a second table's byte by the step's mask bits). A step of 32 bytes, where the body's
+    // registers hold them, is 8 lanes of 4 bytes (a lane of 8, two) moved by
     // a row's byte indices widened (`swizzle_zero` unchecked: x86-64's VPERMD); one of 16 or 8 is bytes
     // moved by the `u8` `swizzle_zero` entry. Where nothing shuffles a step (x86-64 before SSSE3; a vector
     // below 8 bytes), lanes of 2 bytes or more go one by one in groups of at most 4: each lane is stored
@@ -5107,10 +5104,10 @@ extend Lower {
         let s = self.rodata(&mut tb);
         let ks = self.sym_of(s);
         let tbl = self.inst(O_SYMADDR, T_PTR, 0, ks, 0, VNONE);
-        // A shuffled step's lane count: the bit count of its mask bits, else byte r of a second table.
-        let pop = ub != 0 && (cpu.popcnt || cpu.cssc);
+        // A shuffled step's lane count: byte r of a second table. No bit count: the byte is one load on
+        // every target, and wasm32's `popcnt` is not one instruction on every host.
         let mut tcnt = VNONE;
-        if ub != 0 && !pop {
+        if ub != 0 {
             let mut tc = String::with_capacity(rows as usize);
             for r in 0..rows {
                 tc.push_byte(r.count_ones() as u8);
@@ -5119,15 +5116,17 @@ extend Lower {
             let kc = self.sym_of(sc);
             tcnt = self.inst(O_SYMADDR, T_PTR, 0, kc, 0, VNONE);
         }
-        // The count, before the test: a bit count, else (no shuffle) the offset past the last step.
+        // The rows, the offsets and the count, before the test: the count is the offset past the last
+        // step, which for shuffled steps is the last one's offset and its count byte.
         let steps = n / cl;
         let mut rws = Vector::<Value>::with_capacity(steps as usize);
         let mut offs = Vector::<Value>::with_capacity(steps as usize);
+        let end = self.compress_rows(m, steps, cl, ub, tbl, tcnt, &mut rws, &mut offs);
         let cnt = if ub != 0 {
-            let all = self.inst(O_POPCNT, T_I64, 0, m, VNONE, VNONE);
-            self.int_to(all, it, false)
+            let lc = self.load(T_I8, self.ptradd(tcnt, rws[steps as usize - 1], 1, 0), 0, true);
+            self.arith(O_ADD, end, self.int_to(lc, it, false))
         } else {
-            self.compress_rows(m, steps, cl, ub, pop, tbl, tcnt, &mut rws, &mut offs)
+            end
         };
         // `start + n <= len`, with no sum that could wrap.
         let n1 = self.iconst(it, n - 1);
@@ -5168,9 +5167,6 @@ extend Lower {
         let es = self.edge(sb, NONE, NONE);
         let _ = self.inst(O_BR, T_NONE, 0, tight, eh, es);
         self.b.begin(fb);
-        if ub != 0 {
-            let _ = self.compress_rows(m, steps, cl, ub, pop, tbl, tcnt, &mut rws, &mut offs);
-        }
         let p = self.ptradd(ptr, st, lb, 0);
         self.compress_stores(&swz, args[3], p, tbl, ub, cb, cl, &rws, &offs);
         let ej = self.edge(join, NONE, NONE);
@@ -5206,11 +5202,7 @@ extend Lower {
                 if h + 1 == 2 * steps {
                     break;
                 }
-                let pc = if pop {
-                    self.inst(O_POPCNT, T_I64, 0, bits, VNONE, VNONE)
-                } else {
-                    self.load(T_I8, self.ptradd(tcnt, self.int_to(bits, it, false), 1, 0), 0, true)
-                };
+                let pc = self.load(T_I8, self.ptradd(tcnt, self.int_to(bits, it, false), 1, 0), 0, true);
                 hk = self.arith(O_ADD, hk, self.int_to(pc, it, false));
             }
             let eh2 = self.edge(join, NONE, NONE);

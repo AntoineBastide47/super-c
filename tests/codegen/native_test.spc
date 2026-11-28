@@ -11315,6 +11315,8 @@ fn main(args: Vector<str>) i32 {
     let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", "lowp", "build --profile=release main.spc -o app");
     let mut ok = r.ok() && r.out_has("vop.compress_store.s.unchecked") && !r.out_has("vop.compress_store.s.i");
     ok = ok && r.out_has("__sc_vec_bounds");
+    // The steps' lane counts are table bytes: no bit count.
+    ok = ok && !r.out_has("popcnt.");
     // No checked gather is left: the trap's call, and the lanes' loads under the constant mask.
     ok = ok && !r.out_has("vop.gather.") && r.out_has("__sc_lane_bounds") && r.out_has("load.f32");
     if tgt::host_isa() == tgt::axis_index("x86_64", true) {
